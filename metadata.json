@@ -1,0 +1,5 @@
+{
+  "name": "Gemini Voice Task Master",
+  "description": "A next-generation Todo app featuring real-time voice interaction powered by Gemini 2.5 Live API, text-to-speech for task reading, and Google Search grounding for smart task planning.",
+  "requestFramePermissions": []
+}
