@@ -3,12 +3,14 @@
 const API_URL =
   (import.meta as any)?.env?.VITE_API_URL ||
   'https://fast-api-v.onrender.com';
-const API_BEARER_TOKEN = (import.meta as any)?.env?.VITE_API_BEARER_TOKEN || 's3cr3t-Xjd94jf2kLl';
+
+const API_BEARER_TOKEN = 's3cr3t-Xjd94jf2kLl';
 
 interface ReminderResponse {
   success: boolean;
   message: string;
   data?: any;
+  reminderText?: string;
 }
 
 export const sendReminder = async (
@@ -41,7 +43,7 @@ export const sendReminder = async (
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${API_BEARER_TOKEN}`,
+        "Authorization": `${API_BEARER_TOKEN}`,
       },
       body: JSON.stringify(body),
     });
@@ -56,7 +58,9 @@ export const sendReminder = async (
     return { 
         success: true, 
         message: "Reminder sent successfully to AI Endpoint",
-        data: data
+        data: data,
+        // extra helper para consumir directamente el texto en App
+        reminderText: data?.reminder_text
     };
 
   } catch (err: any) {

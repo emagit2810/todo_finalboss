@@ -1,4 +1,3 @@
-
 import React, { useEffect } from 'react';
 import { CheckIcon, XMarkIcon } from './Icons';
 
@@ -6,15 +5,17 @@ interface ToastProps {
   message: string;
   type: 'success' | 'error';
   onClose: () => void;
+  sticky?: boolean; // si true, no se autocierra
 }
 
-export const Toast: React.FC<ToastProps> = ({ message, type, onClose }) => {
+export const Toast: React.FC<ToastProps> = ({ message, type, onClose, sticky }) => {
   useEffect(() => {
+    if (sticky) return;
     const timer = setTimeout(() => {
       onClose();
     }, 3000);
     return () => clearTimeout(timer);
-  }, [onClose]);
+  }, [onClose, sticky]);
 
   return (
     <div className={`

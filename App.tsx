@@ -37,7 +37,7 @@ function App() {
   const [showReminderInput, setShowReminderInput] = useState(false);
   const [reminderText, setReminderText] = useState('');
   const [reminderLoading, setReminderLoading] = useState(false);
-  const [notification, setNotification] = useState<{ message: string, type: 'success' | 'error' } | null>(null);
+  const [notification, setNotification] = useState<{ message: string, type: 'success' | 'error', sticky?: boolean } | null>(null);
 
   // --- Initialization (Load from IndexedDB) ---
   useEffect(() => {
@@ -191,7 +191,24 @@ function App() {
       setReminderLoading(false);
       
       if (res.success) {
-          setNotification({ message: res.message, type: 'success' });
+          const reminderTextFromApi = res.reminderText || res.data?.reminder_text || textToSend;
+          // Notificación pegajosa hasta que el usuario la cierre
+          setNotification({ message: reminderTextFromApi, type: 'success', sticky: true });
+
+          // Crear una nueva tarea a partir del recordatorio devuelto
+          const newTodo: Todo = {
+              id: crypto.randomUUID(),
+              text: reminderTextFromApi,
+              completed: false,
+              createdAt: Date.now(),
+              priority: inputPriority,
+              complexity: 1,
+              subtasks: [],
+              dueDate: undefined
+          };
+          setTodos(prev => [newTodo, ...prev]);
+          await db.putItem('todos', newTodo);
+
           setReminderText('');
           setShowReminderInput(false);
       } else {
@@ -499,6 +516,7 @@ function App() {
         <Toast 
             message={notification.message} 
             type={notification.type} 
+            sticky={notification.sticky}
             onClose={() => setNotification(null)} 
         />
       )}
