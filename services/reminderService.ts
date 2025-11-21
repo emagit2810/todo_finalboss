@@ -43,7 +43,7 @@ export const sendReminder = async (
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `${API_BEARER_TOKEN}`,
+        "Authorization": `Bearer ${API_BEARER_TOKEN}`,
       },
       body: JSON.stringify(body),
     });
