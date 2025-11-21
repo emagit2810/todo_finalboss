@@ -4,7 +4,7 @@ const API_URL =
   (import.meta as any)?.env?.VITE_API_URL ||
   'https://fast-api-v.onrender.com';
 
-const API_BEARER_TOKEN = 's3cr3t-Xjd94jf2kLl';
+const API_BEARER_TOKEN ='s3cr3t-Xjd94jf2kLl';
 
 interface ReminderResponse {
   success: boolean;
