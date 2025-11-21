@@ -1,10 +1,9 @@
 
-// Safely access environment variables to prevent crashes if import.meta.env is undefined
-
-// Updated to the specific API URL provided
-const API_URL = (import.meta as any)?.env?.VITE_API_URL || 'https://fast-api-v.onrender.com';
-// Updated to the specific Bearer Token provided
-const API_BEARER_TOKEN = (import.meta as any)?.env?.VITE_API_BEARER_TOKEN || 's3cr3t-Xjd94jf2kLl';
+// Environment helpers (no fallback secrets in producción)
+const API_URL =
+  (import.meta as any)?.env?.VITE_API_URL ||
+  'https://fast-api-v.onrender.com';
+const API_BEARER_TOKEN = (import.meta as any)?.env?.VITE_API_BEARER_TOKEN || '';
 
 interface ReminderResponse {
   success: boolean;
@@ -14,22 +13,30 @@ interface ReminderResponse {
 
 export const sendReminder = async (
   text: string, 
-  contextData: { taskId?: string; priority?: any; type: 'TODO' | 'MEDICINE' }
+  contextData: { taskId?: string; priority?: string | number; type: 'TODO' | 'MEDICINE' }
 ): Promise<ReminderResponse> => {
-  // CAMBIO 1: Loguear la URL correcta
-  console.log(`[ReminderService] Sending to ${API_URL}/reminder: "${text}"`, contextData);
+  if (!API_BEARER_TOKEN) {
+    console.warn('[ReminderService] Missing VITE_API_BEARER_TOKEN');
+  }
+
+  // Normalizar prioridad a entero para cumplir con ReminderIn (int | None)
+  const PRIORITY_MAP: Record<string, number> = { P1: 1, P2: 2, P3: 3, P4: 4 };
+  let priority: number | null = null;
+  if (typeof contextData.priority === 'number') {
+    priority = contextData.priority;
+  } else if (typeof contextData.priority === 'string') {
+    priority = PRIORITY_MAP[contextData.priority] ?? null;
+  }
 
   try {
-    // CAMBIO 2: Usar la estructura exacta que espera ReminderIn en main.py
     const body = {
-        text: text,
+        text,
         task_id: contextData.taskId || crypto.randomUUID(),
-        due_date: null,
-        priority: contextData.priority || 2,
-        type: contextData.type
+        due_date: null as string | null,
+        priority,               // int | null
+        type: contextData.type, // 'TODO' | 'MEDICINE'
     };
 
-    // CAMBIO 3: Apuntar al endpoint correcto /reminder
     const res = await fetch(`${API_URL}/reminder`, {
       method: "POST",
       headers: {
