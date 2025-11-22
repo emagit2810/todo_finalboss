@@ -1,49 +1,43 @@
+// Safely access environment variables to prevent crashes if import.meta.env is undefined
 
-// Environment helpers (no fallback secrets in producción)
-const API_URL =
-  (import.meta as any)?.env?.VITE_API_URL ||
-  'https://fast-api-v.onrender.com';
-
-const API_BEARER_TOKEN ='s3cr3t-Xjd94jf2kLl';
+// Updated to the specific API URL provided
+const API_URL = (import.meta as any)?.env?.VITE_API_URL || 'https://fast-api-v.onrender.com';
+// Updated to the specific Bearer Token provided
+const API_BEARER_TOKEN = (import.meta as any)?.env?.VITE_API_BEARER_TOKEN || 's3cr3t-Xjd94jf2kLl';
 
 interface ReminderResponse {
   success: boolean;
   message: string;
   data?: any;
+  whatsappLink?: string;
   reminderText?: string;
+  whatsappLinkOpened?: boolean;
+  errorCode?: string;
 }
 
 export const sendReminder = async (
-  text: string, 
-  contextData: { taskId?: string; priority?: string | number; type: 'TODO' | 'MEDICINE' }
+  text: string,
+  contextData: { taskId?: string; priority?: any; type: 'TODO' | 'MEDICINE' }
 ): Promise<ReminderResponse> => {
-  if (!API_BEARER_TOKEN) {
-    console.warn('[ReminderService] Missing VITE_API_BEARER_TOKEN');
-  }
-
-  // Normalizar prioridad a entero para cumplir con ReminderIn (int | None)
-  const PRIORITY_MAP: Record<string, number> = { P1: 1, P2: 2, P3: 3, P4: 4 };
-  let priority: number | null = null;
-  if (typeof contextData.priority === 'number') {
-    priority = contextData.priority;
-  } else if (typeof contextData.priority === 'string') {
-    priority = PRIORITY_MAP[contextData.priority] ?? null;
-  }
+  // CAMBIO 1: Loguear la URL correcta
+  console.log(`[ReminderService] Sending to ${API_URL}/reminder: "${text}"`, contextData);
 
   try {
+    // CAMBIO 2: Usar la estructura exacta que espera ReminderIn en main.py
     const body = {
-        text,
-        task_id: contextData.taskId || crypto.randomUUID(),
-        due_date: null as string | null,
-        priority,               // int | null
-        type: contextData.type, // 'TODO' | 'MEDICINE'
+      text,
+      task_id: contextData.taskId || crypto.randomUUID(),
+      due_date: null,
+      priority: contextData.priority || 2,
+      type: contextData.type,
     };
 
+    // CAMBIO 3: Apuntar al endpoint correcto /reminder
     const res = await fetch(`${API_URL}/reminder`, {
-      method: "POST",
+      method: 'POST',
       headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${API_BEARER_TOKEN}`,
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${API_BEARER_TOKEN}`,
       },
       body: JSON.stringify(body),
     });
@@ -54,22 +48,41 @@ export const sendReminder = async (
     }
 
     const data = await res.json();
-    
-    return { 
-        success: true, 
-        message: "Reminder sent successfully to AI Endpoint",
-        data: data,
-        // extra helper para consumir directamente el texto en App
-        reminderText: data?.reminder_text
-    };
+    const reminderText = data?.reminder_text || data?.reminderText;
+    const whatsappLink = data?.whatsapp_link || data?.whatsappLink;
 
-  } catch (err: any) {
-    console.error("Error sending reminder:", err);
-    
-    // Fallback message
-    return { 
-        success: false, 
-        message: `Failed to send: ${err.message || "Unknown error"}` 
+    // Intenta abrir el link de WhatsApp inmediatamente para disparar el mensaje.
+    const whatsappLinkOpened = tryOpenWhatsAppLink(whatsappLink);
+
+    return {
+      success: true,
+      message: 'Reminder sent successfully to AI Endpoint',
+      data,
+      reminderText,
+      whatsappLink,
+      whatsappLinkOpened,
     };
+  } catch (err: any) {
+    console.error('Error sending reminder:', err);
+
+    // Fallback message
+    return {
+      success: false,
+      message: `Failed to send: ${err.message || 'Unknown error'}`,
+      errorCode: err?.code || undefined,
+    };
+  }
+};
+
+// Helper para reintentar abrir el link desde un boton en notificacion / task.
+export const tryOpenWhatsAppLink = (link?: string): boolean => {
+  if (!link) return false;
+  if (typeof window === 'undefined' || typeof window.open !== 'function') return false;
+  try {
+    const tab = window.open(link, '_blank', 'noopener,noreferrer');
+    return !!tab;
+  } catch (error) {
+    console.warn('No se pudo abrir el link de WhatsApp:', error);
+    return false;
   }
 };
