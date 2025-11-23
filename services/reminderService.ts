@@ -9,15 +9,15 @@ interface ReminderResponse {
   success: boolean;
   message: string;
   data?: any;
-  whatsappLink?: string;
   reminderText?: string;
+  whatsappLink?: string;
   whatsappLinkOpened?: boolean;
   errorCode?: string;
 }
 
 export const sendReminder = async (
   text: string,
-  contextData: { taskId?: string; priority?: any; type: 'TODO' | 'MEDICINE' }
+  contextData: { taskId?: string; priority?: number | string; type?: string; dueDate?: string | null }
 ): Promise<ReminderResponse> => {
   // CAMBIO 1: Loguear la URL correcta
   console.log(`[ReminderService] Sending to ${API_URL}/reminder: "${text}"`, contextData);
@@ -27,9 +27,12 @@ export const sendReminder = async (
     const body = {
       text,
       task_id: contextData.taskId || crypto.randomUUID(),
-      due_date: null,
-      priority: contextData.priority || 2,
-      type: contextData.type,
+      priority:
+        contextData.priority === undefined || contextData.priority === null
+          ? null
+          : Number(contextData.priority),
+      due_date: contextData.dueDate ?? null,
+      type: contextData.type ?? null,
     };
 
     // CAMBIO 3: Apuntar al endpoint correcto /reminder
