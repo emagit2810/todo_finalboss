@@ -292,6 +292,21 @@ function App() {
     setBrainstormQuery('');
   };
 
+  // --- Quick navigation shortcuts (used from Calendar modal) ---
+  const openReminderFromCalendar = useCallback(() => {
+    setViewMode(ViewMode.LIST);
+    setShowReminderInput(true);
+    setIsInputExpanded(true);
+  }, []);
+
+  const openMedicinesFromCalendar = useCallback(() => {
+    setViewMode(ViewMode.MEDICINES);
+  }, []);
+
+  const openExpensesFromCalendar = useCallback(() => {
+    setViewMode(ViewMode.EXPENSES);
+  }, []);
+
   // --- Render Content Area ---
   const renderContent = () => {
     if (viewMode === ViewMode.MEDICINES) {
@@ -320,11 +335,14 @@ function App() {
     }
 
     if (viewMode === ViewMode.CALENDAR) {
-        return (
+      return (
             <CalendarPanel 
                 todos={todos}
                 onUpdateTodo={handleUpdateTodo}
                 onAddTodo={(text, priority, date) => addTodo(text, priority, date)}
+                onOpenReminder={openReminderFromCalendar}
+                onOpenMedicines={openMedicinesFromCalendar}
+                onOpenExpenses={openExpensesFromCalendar}
             />
         );
     }
