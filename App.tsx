@@ -3,7 +3,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Todo, ViewMode, Medicine, Expense, Priority, Subtask } from './types';
 import { TodoItem } from './components/TodoItem';
 import { brainstormTasks } from './services/geminiService';
-import { PlusIcon, BrainIcon, ArrowsExpandIcon, ArrowsCollapseIcon, FlagIcon, BellIcon, ClockIcon, MicIcon } from './components/Icons';
+import { PlusIcon, BrainIcon, ArrowsExpandIcon, ArrowsCollapseIcon, FlagIcon, BellIcon, ClockIcon } from './components/Icons';
 import { MedicinePanel } from './components/MedicinePanel';
 import { ExpensesPanel } from './components/ExpensesPanel';
 import { CalendarPanel } from './components/CalendarPanel';
@@ -11,6 +11,7 @@ import { Sidebar } from './components/Sidebar';
 import * as db from './services/db';
 import { sendReminder } from './services/reminderService';
 import { Toast } from './components/Toast';
+import { VoiceDictation } from './components/VoiceDictation';
 
 function App() {
   // --- State: Todos ---
@@ -352,6 +353,25 @@ function App() {
         ? todos 
         : todos.filter(t => (t.priority || 'P4') === filterPriority);
 
+    const priorityOrder: Record<Priority, number> = {
+        P1: 1,
+        P2: 2,
+        P3: 3,
+        P4: 4,
+    };
+
+    const sortedTodos = [...filteredTodos].sort((a, b) => {
+        const aPriority = priorityOrder[a.priority || 'P4'];
+        const bPriority = priorityOrder[b.priority || 'P4'];
+        if (aPriority !== bPriority) return aPriority - bPriority;
+
+        const aComplexity = a.complexity || 1;
+        const bComplexity = b.complexity || 1;
+        if (aComplexity !== bComplexity) return aComplexity - bComplexity;
+
+        return (b.createdAt || 0) - (a.createdAt || 0);
+    });
+
     return (
         <div className="max-w-3xl mx-auto">
             {/* Input Section */}
@@ -378,17 +398,13 @@ function App() {
                    {/* Controls Group */}
                    <div className="absolute right-3 bottom-3 flex items-center gap-2 bg-slate-900/80 backdrop-blur-sm p-1 rounded-lg z-20">
                      
-                     {/* Microphone Button */}
-                     <button
-                        onClick={() => {
-                            // TODO: Implement microphone functionality
-                            console.log('Microphone clicked');
+                     {/* Microphone Dictation */}
+                     <VoiceDictation
+                        onTranscript={(text) => {
+                            setInputValue((prev) => (prev ? `${prev} ${text}` : text));
+                            setIsInputExpanded(true);
                         }}
-                        className="p-2 rounded-lg transition-colors text-slate-400 hover:text-white hover:bg-slate-800"
-                        title="Activar audio"
-                     >
-                         <MicIcon className="w-5 h-5" />
-                     </button>
+                     />
 
                      {/* Reminder Button (Toggles extra input) */}
                      <button
@@ -525,7 +541,7 @@ function App() {
                        <p>{todos.length === 0 ? "No tasks yet." : "No tasks found with this filter."}</p>
                      </div>
                   )}
-                  {filteredTodos.map(todo => (
+                  {sortedTodos.map(todo => (
                     <TodoItem 
                       key={todo.id} 
                       todo={todo} 
