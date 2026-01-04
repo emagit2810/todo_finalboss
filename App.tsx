@@ -3,7 +3,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Todo, ViewMode, Medicine, Expense, Priority, Subtask } from './types';
 import { TodoItem } from './components/TodoItem';
 import { brainstormTasks } from './services/geminiService';
-import { PlusIcon, BrainIcon, ArrowsExpandIcon, ArrowsCollapseIcon, FlagIcon, BellIcon, ClockIcon } from './components/Icons';
+import { PlusIcon, BrainIcon, ArrowsExpandIcon, ArrowsCollapseIcon, FlagIcon, BellIcon, ClockIcon, MicIcon } from './components/Icons';
 import { MedicinePanel } from './components/MedicinePanel';
 import { ExpensesPanel } from './components/ExpensesPanel';
 import { CalendarPanel } from './components/CalendarPanel';
@@ -378,6 +378,18 @@ function App() {
                    {/* Controls Group */}
                    <div className="absolute right-3 bottom-3 flex items-center gap-2 bg-slate-900/80 backdrop-blur-sm p-1 rounded-lg z-20">
                      
+                     {/* Microphone Button */}
+                     <button
+                        onClick={() => {
+                            // TODO: Implement microphone functionality
+                            console.log('Microphone clicked');
+                        }}
+                        className="p-2 rounded-lg transition-colors text-slate-400 hover:text-white hover:bg-slate-800"
+                        title="Activar audio"
+                     >
+                         <MicIcon className="w-5 h-5" />
+                     </button>
+
                      {/* Reminder Button (Toggles extra input) */}
                      <button
                         onClick={() => setShowReminderInput(!showReminderInput)}
@@ -553,10 +565,10 @@ function App() {
            {viewMode === ViewMode.LIST && (
                <div className="max-w-3xl mx-auto mb-8">
                    <h2 className="text-3xl font-bold text-white mb-1 bg-gradient-to-r from-primary-400 to-indigo-400 bg-clip-text text-transparent inline-block">
-                       My Tasks
+                       todo app
                    </h2>
                    <p className="text-slate-400 text-sm">
-                       {filterPriority === 'ALL' ? 'Voice-powered & AI-grounded workspace' : `Showing ${filterPriority} Priority Tasks`}
+                       {filterPriority === 'ALL' ? 'lista de tareas con calendario y programacion' : `Showing ${filterPriority} Priority Tasks`}
                    </p>
                </div>
            )}
