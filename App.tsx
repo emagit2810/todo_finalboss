@@ -50,7 +50,43 @@ function App() {
 
             // Load Medicines
             const loadedMedicines = await db.getAll('medicines');
-            setMedicines(loadedMedicines);
+            const MS_DAY = 24 * 60 * 60 * 1000;
+            const getTodayStart = () => {
+                const now = new Date();
+                return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+            };
+            const todayStart = getTodayStart();
+            const normalizedMedicines: Medicine[] = [];
+            const medicinesToUpdate: Medicine[] = [];
+
+            for (const med of loadedMedicines) {
+                const lastUpdated = med.lastUpdated ?? todayStart;
+                const remaining = Number.isFinite(med.remaining) ? med.remaining : 30;
+                const daysPassed = Math.max(0, Math.floor((todayStart - lastUpdated) / MS_DAY));
+                const nextRemaining = Math.max(0, remaining - daysPassed);
+                const alarmEnabled = med.alarmEnabled ?? false;
+                const updatedMed = {
+                    ...med,
+                    remaining: nextRemaining,
+                    lastUpdated: todayStart,
+                    alarmEnabled,
+                };
+                normalizedMedicines.push(updatedMed);
+
+                if (
+                    nextRemaining !== remaining ||
+                    lastUpdated !== todayStart ||
+                    med.remaining === undefined ||
+                    med.alarmEnabled === undefined
+                ) {
+                    medicinesToUpdate.push(updatedMed);
+                }
+            }
+
+            setMedicines(normalizedMedicines);
+            for (const med of medicinesToUpdate) {
+                await db.putItem('medicines', med);
+            }
 
             // Load Expenses
             let loadedExpenses = await db.getAll('expenses');
@@ -339,6 +375,7 @@ function App() {
       return (
             <CalendarPanel 
                 todos={todos}
+                medicines={medicines}
                 onUpdateTodo={handleUpdateTodo}
                 onAddTodo={(text, priority, date) => addTodo(text, priority, date)}
                 onOpenReminder={openReminderFromCalendar}

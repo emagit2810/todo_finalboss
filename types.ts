@@ -25,7 +25,9 @@ export interface Medicine {
   name: string;
   dosage: string;
   taken: boolean;
-  time: string; // e.g. "Morning", "Night"
+  remaining: number; // days of medicine left
+  lastUpdated?: number; // start-of-day timestamp to track daily decrement
+  alarmEnabled?: boolean; // show refill alerts on calendar
 }
 
 export interface Expense {

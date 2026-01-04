@@ -1,7 +1,7 @@
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Medicine } from '../types';
-import { XMarkIcon, TrashIcon, PlusIcon, CheckIcon, BellIcon } from './Icons';
+import { XMarkIcon, TrashIcon, PlusIcon, CheckIcon, BellIcon, CalendarIcon, ChevronDownIcon, ChevronUpIcon } from './Icons';
 import { sendReminder } from '../services/reminderService';
 
 interface MedicinePanelProps {
@@ -29,21 +29,77 @@ export const MedicinePanel: React.FC<MedicinePanelProps> = ({
 }) => {
   const [name, setName] = useState('');
   const [dosage, setDosage] = useState('');
-  const [time, setTime] = useState('Morning');
+  const [remainingInput, setRemainingInput] = useState(30);
+  const [calendarAlarm, setCalendarAlarm] = useState(false);
   
   // Reminder State
   const [reminderText, setReminderText] = useState('');
   const [showReminder, setShowReminder] = useState(false);
   const [reminderLoading, setReminderLoading] = useState(false);
+  const [timeTick, setTimeTick] = useState(Date.now());
+
+  const MS_DAY = 24 * 60 * 60 * 1000;
+  const DEFAULT_REMAINING = 30;
+  const MAX_REMAINING = 365;
+
+  const getTodayStart = () => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  };
+
+  const clampRemaining = (value: number) => Math.max(0, Math.min(MAX_REMAINING, value));
+
+  const getRemainingForMedicine = (med: Medicine, todayStart = getTodayStart()) => {
+    const lastUpdated = med.lastUpdated ?? todayStart;
+    const remaining = Number.isFinite(med.remaining) ? med.remaining : DEFAULT_REMAINING;
+    const daysPassed = Math.max(0, Math.floor((todayStart - lastUpdated) / MS_DAY));
+    return Math.max(0, remaining - daysPassed);
+  };
+
+  useEffect(() => {
+    const id = setInterval(() => setTimeTick(Date.now()), 60 * 60 * 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    const todayStart = getTodayStart();
+    const updates: Record<string, Medicine> = {};
+    let changed = false;
+
+    for (const med of medicines) {
+      const remaining = getRemainingForMedicine(med, todayStart);
+      const alarmEnabled = med.alarmEnabled ?? false;
+      const lastUpdated = med.lastUpdated ?? todayStart;
+      if (
+        remaining !== med.remaining ||
+        lastUpdated !== todayStart ||
+        med.remaining === undefined ||
+        med.alarmEnabled === undefined
+      ) {
+        updates[med.id] = { ...med, remaining, lastUpdated: todayStart, alarmEnabled };
+        changed = true;
+      }
+    }
+
+    if (!changed) return;
+    if (onUpdate) {
+      Object.values(updates).forEach((updated) => onUpdate(updated));
+    } else {
+      setMedicines((prev) => prev.map((m) => updates[m.id] ?? m));
+    }
+  }, [medicines, onUpdate, setMedicines, timeTick]);
 
   const addMedicine = () => {
     if (!name.trim()) return;
+    const todayStart = getTodayStart();
     const newMed: Medicine = {
       id: crypto.randomUUID(),
       name: name.trim(),
       dosage: dosage.trim(),
-      time,
       taken: false,
+      remaining: clampRemaining(remainingInput || DEFAULT_REMAINING),
+      lastUpdated: todayStart,
+      alarmEnabled: calendarAlarm,
     };
     
     // Use the specialized handler if available (for DB sync), otherwise fallback to setState
@@ -55,6 +111,8 @@ export const MedicinePanel: React.FC<MedicinePanelProps> = ({
     
     setName('');
     setDosage('');
+    setRemainingInput(DEFAULT_REMAINING);
+    setCalendarAlarm(false);
     setReminderText('');
     setShowReminder(false);
   };
@@ -76,6 +134,38 @@ export const MedicinePanel: React.FC<MedicinePanelProps> = ({
         onDelete(id);
     } else {
         setMedicines(prev => prev.filter(m => m.id !== id));
+    }
+  };
+
+  const updateRemaining = (med: Medicine, delta: number) => {
+    const todayStart = getTodayStart();
+    const current = getRemainingForMedicine(med, todayStart);
+    const next = clampRemaining(current + delta);
+    const updated = { ...med, remaining: next, lastUpdated: todayStart };
+    if (onUpdate) {
+      onUpdate(updated);
+    } else {
+      setMedicines((prev) => prev.map((m) => (m.id === med.id ? updated : m)));
+    }
+  };
+
+  const setRemainingExact = (med: Medicine, value: number) => {
+    const todayStart = getTodayStart();
+    const next = clampRemaining(value);
+    const updated = { ...med, remaining: next, lastUpdated: todayStart };
+    if (onUpdate) {
+      onUpdate(updated);
+    } else {
+      setMedicines((prev) => prev.map((m) => (m.id === med.id ? updated : m)));
+    }
+  };
+
+  const toggleCalendarAlarm = (med: Medicine) => {
+    const updated = { ...med, alarmEnabled: !med.alarmEnabled };
+    if (onUpdate) {
+      onUpdate(updated);
+    } else {
+      setMedicines((prev) => prev.map((m) => (m.id === med.id ? updated : m)));
     }
   };
 
@@ -151,15 +241,42 @@ export const MedicinePanel: React.FC<MedicinePanelProps> = ({
                     onChange={(e) => setDosage(e.target.value)}
                     className="flex-1 bg-slate-900 border border-slate-700 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-primary-500"
                   />
-                  <select 
-                    value={time}
-                    onChange={(e) => setTime(e.target.value)}
-                    className="bg-slate-900 border border-slate-700 rounded-md px-2 py-2 text-sm focus:outline-none focus:border-primary-500"
+                  <div className="flex items-center bg-slate-900 border border-slate-700 rounded-md overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => setRemainingInput((prev) => clampRemaining(prev - 1))}
+                      className="px-2 py-1 text-slate-400 hover:text-white hover:bg-slate-800 border-r border-slate-800"
+                      title="Decrease"
+                    >
+                      <ChevronDownIcon className="w-3 h-3" />
+                    </button>
+                    <input
+                      type="number"
+                      min={0}
+                      max={MAX_REMAINING}
+                      value={remainingInput}
+                      onChange={(e) => setRemainingInput(clampRemaining(Number(e.target.value || 0)))}
+                      className="w-14 bg-transparent text-center text-sm text-slate-200 focus:outline-none"
+                      title="Days left"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setRemainingInput((prev) => clampRemaining(prev + 1))}
+                      className="px-2 py-1 text-slate-400 hover:text-white hover:bg-slate-800 border-l border-slate-800"
+                      title="Increase"
+                    >
+                      <ChevronUpIcon className="w-3 h-3" />
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setCalendarAlarm((prev) => !prev)}
+                    className={`px-3 rounded-md border transition-colors ${calendarAlarm ? 'bg-amber-900/40 border-amber-500 text-amber-300' : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-white'}`}
+                    title="Add calendar alarm"
                   >
-                    <option>Morning</option>
-                    <option>Noon</option>
-                    <option>Night</option>
-                  </select>
+                    <CalendarIcon className="w-4 h-4" />
+                  </button>
 
                   {/* Reminder Toggle Button */}
                    <button 
@@ -216,12 +333,48 @@ export const MedicinePanel: React.FC<MedicinePanelProps> = ({
                      </button>
                      <div>
                        <p className={`font-medium text-sm ${med.taken ? 'text-slate-500 line-through' : 'text-slate-200'}`}>{med.name}</p>
-                       <p className="text-xs text-slate-500">{med.dosage} • {med.time}</p>
+                       <p className="text-xs text-slate-500">{med.dosage} - {getRemainingForMedicine(med)} left</p>
                      </div>
                    </div>
-                   <button onClick={() => deleteMedicine(med.id)} className="text-slate-500 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
-                     <TrashIcon className="w-4 h-4" />
-                   </button>
+                   <div className="flex items-center gap-1">
+                     <div className="flex items-center bg-slate-900 rounded-md border border-slate-700 overflow-hidden">
+                       <button
+                         type="button"
+                         onClick={() => updateRemaining(med, -1)}
+                         className="px-2 py-1 text-slate-400 hover:text-white hover:bg-slate-800 border-r border-slate-800"
+                         title="Decrease"
+                       >
+                         <ChevronDownIcon className="w-3 h-3" />
+                       </button>
+                       <input
+                         type="number"
+                         min={0}
+                         max={MAX_REMAINING}
+                         value={getRemainingForMedicine(med)}
+                         onChange={(e) => setRemainingExact(med, Number(e.target.value || 0))}
+                         className="w-12 bg-transparent text-center text-xs text-slate-200 focus:outline-none"
+                         title="Days left"
+                       />
+                       <button
+                         type="button"
+                         onClick={() => updateRemaining(med, 1)}
+                         className="px-2 py-1 text-slate-400 hover:text-white hover:bg-slate-800 border-l border-slate-800"
+                         title="Increase"
+                       >
+                         <ChevronUpIcon className="w-3 h-3" />
+                       </button>
+                     </div>
+                     <button
+                       onClick={() => toggleCalendarAlarm(med)}
+                       className={`p-2 rounded-md transition-colors ${med.alarmEnabled ? 'text-amber-300 bg-amber-900/40' : 'text-slate-500 hover:text-amber-300 hover:bg-slate-700/50'}`}
+                       title="Toggle calendar alarm"
+                     >
+                       <CalendarIcon className="w-4 h-4" />
+                     </button>
+                     <button onClick={() => deleteMedicine(med.id)} className="text-slate-500 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
+                       <TrashIcon className="w-4 h-4" />
+                     </button>
+                   </div>
                  </div>
                ))}
             </div>

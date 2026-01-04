@@ -64,7 +64,7 @@ export const ExpensesPanel: React.FC<ExpensesPanelProps> = ({ expenses, onAdd, o
           {title}
         </h2>
         <div className="text-right text-sm">
-             <span className="text-slate-500 block">Monthly Total</span>
+             <span className="text-slate-500 block">total mes</span>
              <span className={`font-mono font-bold ${colorClass}`}>
                 {formatear(category === 'A' ? totals.mensualA : totals.mensualB)}
              </span>
@@ -161,7 +161,7 @@ export const ExpensesPanel: React.FC<ExpensesPanelProps> = ({ expenses, onAdd, o
       <div className="grid md:grid-cols-2 gap-6 mb-8">
         {/* Category A Summary */}
         <div className="bg-indigo-900/20 rounded-xl p-6 border border-indigo-500/30 backdrop-blur-sm">
-          <h2 className="text-lg font-bold text-indigo-300 mb-4">Categoría A - Principal</h2>
+          <h2 className="text-lg font-bold text-indigo-300 mb-4">Emmanuel (personal)</h2>
           <div className="space-y-2">
             <div className="flex justify-between items-center">
               <span className="text-indigo-400/80 text-sm">Total Semanal:</span>
@@ -176,7 +176,7 @@ export const ExpensesPanel: React.FC<ExpensesPanelProps> = ({ expenses, onAdd, o
 
         {/* Category B Summary */}
         <div className="bg-emerald-900/20 rounded-xl p-6 border border-emerald-500/30 backdrop-blur-sm">
-          <h2 className="text-lg font-bold text-emerald-300 mb-4">Categoría B - Otros</h2>
+          <h2 className="text-lg font-bold text-emerald-300 mb-4">(global/abuela)</h2>
           <div className="space-y-2">
             <div className="flex justify-between items-center">
               <span className="text-emerald-400/80 text-sm">Total Semanal:</span>
@@ -198,19 +198,19 @@ export const ExpensesPanel: React.FC<ExpensesPanelProps> = ({ expenses, onAdd, o
         </div>
         <div className="grid md:grid-cols-2 gap-4">
           <div className="bg-slate-900/40 rounded-lg p-4 border border-white/5">
-            <div className="text-sm text-slate-400 mb-1">Total Semanal (A+B)</div>
+            <div className="text-sm text-slate-400 mb-1">Total Semanal (emmanuel + global)</div>
             <div className="text-3xl font-bold font-mono text-white">{formatear(totals.semanalA + totals.semanalB)}</div>
           </div>
           <div className="bg-slate-900/40 rounded-lg p-4 border border-white/5">
-            <div className="text-sm text-slate-400 mb-1">Total Mensual (A+B)</div>
+            <div className="text-sm text-slate-400 mb-1">Total Mensual (emmanuel + global)</div>
             <div className="text-3xl font-bold font-mono text-emerald-400">{formatear(totals.mensualA + totals.mensualB)}</div>
           </div>
         </div>
       </div>
 
       {/* Tables */}
-      {renderTable('A', 'Gastos Categoría A', 'text-indigo-300', 'border-indigo-500/20')}
-      {renderTable('B', 'Gastos Categoría B', 'text-emerald-300', 'border-emerald-500/20')}
+      {renderTable('A', 'Gastos Emmanuel (personal)', 'text-indigo-300', 'border-indigo-500/20')}
+      {renderTable('B', 'Gastos (global/abuela)', 'text-emerald-300', 'border-emerald-500/20')}
 
       {/* Add New Form */}
       <div className="bg-slate-800 rounded-xl shadow-lg p-6 border border-slate-700">
@@ -233,8 +233,8 @@ export const ExpensesPanel: React.FC<ExpensesPanelProps> = ({ expenses, onAdd, o
                 onChange={(e) => setNewCategory(e.target.value as 'A' | 'B')}
                 className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-sm focus:outline-none focus:border-primary-500"
             >
-                <option value="A">Categoría A</option>
-                <option value="B">Categoría B</option>
+                <option value="A">Emmanuel (personal)</option>
+                <option value="B">(global/abuela)</option>
             </select>
           </div>
 
