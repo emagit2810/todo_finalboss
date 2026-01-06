@@ -1,18 +1,45 @@
 
 import React, { useState } from 'react';
-import { Todo, Priority, Subtask } from '../types';
-import { CheckIcon, TrashIcon, SpeakerIcon, FlagIcon, ChevronUpIcon, ChevronDownIcon, PlusIcon, XMarkIcon, ClockIcon } from './Icons';
+import { Todo, Priority, Subtask, NoteDoc, NoteFolder } from '../types';
+import { CheckIcon, TrashIcon, SpeakerIcon, FlagIcon, ChevronUpIcon, ChevronDownIcon, PlusIcon, XMarkIcon, ClockIcon, DocumentIcon } from './Icons';
 import { speakText } from '../services/geminiService';
 
 interface TodoItemProps {
   todo: Todo;
   onUpdate: (todo: Todo) => void;
   onDelete: (id: string) => void;
+  notes?: NoteDoc[];
+  noteFolders?: NoteFolder[];
+  onOpenNote?: (noteId: string) => void;
 }
 
-export const TodoItem: React.FC<TodoItemProps> = ({ todo, onUpdate, onDelete }) => {
+export const TodoItem: React.FC<TodoItemProps> = ({ todo, onUpdate, onDelete, notes = [], noteFolders = [], onOpenNote }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [newSubtask, setNewSubtask] = useState('');
+  const [isLinkPickerOpen, setIsLinkPickerOpen] = useState(false);
+  const [linkQuery, setLinkQuery] = useState('');
+
+  const linkedNoteIds = todo.linkedNotes || [];
+  const linkedNotes = linkedNoteIds
+    .map((id) => notes.find((n) => n.id === id) || null)
+    .filter((n): n is NoteDoc => !!n);
+
+  const getFolderName = (folderId: string | null | undefined) => {
+    if (!folderId) return 'Sin carpeta';
+    const folder = noteFolders.find((f) => f.id === folderId);
+    return folder?.name || 'Sin carpeta';
+  };
+
+  const linkNote = (noteId: string) => {
+    const current = new Set(todo.linkedNotes || []);
+    current.add(noteId);
+    onUpdate({ ...todo, linkedNotes: Array.from(current) });
+  };
+
+  const unlinkNote = (noteId: string) => {
+    const next = (todo.linkedNotes || []).filter((id) => id !== noteId);
+    onUpdate({ ...todo, linkedNotes: next.length ? next : undefined });
+  };
 
   const handleSpeak = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -248,6 +275,80 @@ export const TodoItem: React.FC<TodoItemProps> = ({ todo, onUpdate, onDelete }) 
                 </button>
              </div>
          </div>
+      </div>
+
+      {/* Linked Notes Section */}
+      {linkedNotes.length > 0 && (
+        <div className="mt-3 pl-9">
+          <div className="flex flex-wrap gap-2">
+            {linkedNotes.map((note) => (
+              <div
+                key={note.id}
+                className="flex items-center gap-1 bg-slate-700/50 hover:bg-slate-700 rounded-lg px-2 py-1 text-xs text-slate-300 group cursor-pointer"
+                onClick={() => onOpenNote?.(note.id)}
+              >
+                <DocumentIcon className="w-3 h-3 text-indigo-400" />
+                <span>{note.title}</span>
+                <span className="text-slate-500">({getFolderName(note.folderId)})</span>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    unlinkNote(note.id);
+                  }}
+                  className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-red-400 ml-1"
+                >
+                  <XMarkIcon className="w-3 h-3" />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Link Note Button */}
+      <div className="mt-3 pl-9">
+        <button
+          onClick={() => setIsLinkPickerOpen(!isLinkPickerOpen)}
+          className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1"
+        >
+          <PlusIcon className="w-3 h-3" />
+          Vincular nota
+        </button>
+
+        {isLinkPickerOpen && (
+          <div className="mt-2 p-2 bg-slate-900/50 border border-slate-700/50 rounded-lg">
+            <input
+              type="text"
+              value={linkQuery}
+              onChange={(e) => setLinkQuery(e.target.value)}
+              placeholder="Buscar nota..."
+              className="w-full bg-slate-800 border border-slate-600 rounded px-2 py-1 text-sm text-slate-300 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
+            />
+            <div className="mt-2 max-h-32 overflow-y-auto space-y-1">
+              {notes
+                .filter((note) => 
+                  note.title.toLowerCase().includes(linkQuery.toLowerCase()) &&
+                  !linkedNoteIds.includes(note.id)
+                )
+                .slice(0, 5)
+                .map((note) => (
+                  <button
+                    key={note.id}
+                    onClick={() => {
+                      linkNote(note.id);
+                      setIsLinkPickerOpen(false);
+                      setLinkQuery('');
+                    }}
+                    className="w-full text-left text-xs text-slate-300 hover:bg-slate-700 rounded px-2 py-1 flex items-center gap-1"
+                  >
+                    <DocumentIcon className="w-3 h-3 text-indigo-400" />
+                    <span>{note.title}</span>
+                    <span className="text-slate-500">({getFolderName(note.folderId)})</span>
+                  </button>
+                ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

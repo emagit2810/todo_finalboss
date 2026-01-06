@@ -3,7 +3,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Todo, ViewMode, Medicine, Expense, Priority, Subtask, NoteDoc, NoteFolder } from './types';
 import { TodoItem } from './components/TodoItem';
 import { brainstormTasks } from './services/geminiService';
-import { PlusIcon, BrainIcon, ArrowsExpandIcon, ArrowsCollapseIcon, FlagIcon, BellIcon, ClockIcon } from './components/Icons';
+import { PlusIcon, BrainIcon, ArrowsExpandIcon, ArrowsCollapseIcon, FlagIcon, BellIcon, ClockIcon, DocumentIcon, XMarkIcon } from './components/Icons';
 import { MedicinePanel } from './components/MedicinePanel';
 import { ExpensesPanel } from './components/ExpensesPanel';
 import { CalendarPanel } from './components/CalendarPanel';
@@ -49,9 +49,14 @@ function App() {
   const [inputDueDate, setInputDueDate] = useState(''); // YYYY-MM-DD string
   const [isInputExpanded, setIsInputExpanded] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>(ViewMode.LIST);
+  const [openNoteId, setOpenNoteId] = useState<string | null>(null);
   const [brainstormQuery, setBrainstormQuery] = useState('');
   const [brainstormLoading, setBrainstormLoading] = useState(false);
   const [brainstormSources, setBrainstormSources] = useState<Array<{uri: string, title: string}>>([]);
+  
+  // State for note linking on task creation
+  const [isNoteLinkerOpen, setIsNoteLinkerOpen] = useState(false);
+  const [noteLinkQuery, setNoteLinkQuery] = useState('');
 
   // --- State: Reminder / Notification ---
   const [isReminderPanelOpen, setIsReminderPanelOpen] = useState(false);
@@ -169,29 +174,24 @@ function App() {
   }, []);
 
   // --- Handlers: Todos ---
-  const addTodo = useCallback(async (text: string, priority: Priority = 'P4', dateOverride?: number) => {
+  const addTodo = useCallback(async (text: string, priority: Priority = 'P4', dateOverride?: number, linkedNoteId?: string) => {
     if (!text.trim()) return;
-
-    let dueTimestamp: number | undefined = undefined;
-    if (dateOverride) {
-        dueTimestamp = dateOverride;
-    } else if (inputDueDate) {
-         const [y, m, d] = inputDueDate.split('-').map(Number);
-         dueTimestamp = new Date(y, m - 1, d, 12, 0, 0).getTime();
-    }
-
-    const newTodo: Todo = {
-      id: crypto.randomUUID(),
-      text: text.trim(),
-      completed: false,
-      createdAt: Date.now(),
-      priority: priority,
-      complexity: 1,
-      subtasks: [],
-      dueDate: dueTimestamp
-    };
     
-    // Optimistic Update
+    const now = Date.now();
+    const newTodo: Todo = {
+        id: crypto.randomUUID(),
+        text: text.trim(),
+        completed: false,
+        createdAt: now,
+        priority,
+        dueDate: inputDueDate ? (() => {
+            const [y, m, d] = inputDueDate.split('-').map(Number);
+            return new Date(y, m - 1, d, 12, 0, 0).getTime();
+        })() : undefined,
+        linkedNotes: linkedNoteId ? [linkedNoteId] : undefined,
+    };
+
+    // Optimistic
     setTodos(prev => [newTodo, ...prev]);
     setInputValue('');
     setInputPriority('P4'); // Reset to default
@@ -199,6 +199,8 @@ function App() {
     setReminderText(''); // Reset reminder
     setReminderEdited(false);
     setIsReminderPanelOpen(false);
+    setIsNoteLinkerOpen(false);
+    setNoteLinkQuery('');
     
     // DB Update
     await db.putItem('todos', newTodo);
@@ -220,6 +222,15 @@ function App() {
         await db.softDeleteTodo(todoToDelete);
     }
   }, [todos]);
+
+  const handleOpenNote = useCallback((noteId: string) => {
+    setOpenNoteId(noteId);
+    setViewMode(ViewMode.NOTES);
+  }, []);
+
+  const consumeOpenNoteId = useCallback(() => {
+    setOpenNoteId(null);
+  }, []);
 
   const parseSubtasksFromText = (text: string): Subtask[] => {
     const lines = text.split('\n').filter(l => l.trim().length > 0);
@@ -583,6 +594,10 @@ function App() {
                 onAddFolder={handleAddNoteFolder}
                 onUpdateFolder={handleUpdateNoteFolder}
                 onDeleteFolder={handleDeleteNoteFolder}
+                openNoteId={openNoteId}
+                onConsumeOpenNoteId={consumeOpenNoteId}
+                todos={todos}
+                onUpdateTodo={handleUpdateTodo}
             />
         );
     }
@@ -703,7 +718,67 @@ function App() {
                      >
                        <PlusIcon className="w-5 h-5" />
                      </button>
+
+                     {/* Note Link Button */}
+                     <button
+                       onClick={() => setIsNoteLinkerOpen(!isNoteLinkerOpen)}
+                       className={`p-2 rounded-lg transition-colors ${isNoteLinkerOpen ? 'text-indigo-400 bg-indigo-500/20' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
+                       title="Vincular nota"
+                     >
+                       <DocumentIcon className="w-5 h-5" />
+                     </button>
                    </div>
+
+                   {/* Note Linker Panel */}
+                   {isNoteLinkerOpen && (
+                     <div className="absolute right-3 bottom-16 w-80 bg-slate-900 border border-slate-700 rounded-lg p-3 shadow-xl z-30">
+                       <div className="flex items-center justify-between mb-2">
+                         <h4 className="text-sm font-medium text-slate-200">Vincular nota a tarea</h4>
+                         <button
+                           onClick={() => setIsNoteLinkerOpen(false)}
+                           className="text-slate-400 hover:text-slate-200"
+                         >
+                           <XMarkIcon className="w-4 h-4" />
+                         </button>
+                       </div>
+                       
+                       <input
+                         type="text"
+                         value={noteLinkQuery}
+                         onChange={(e) => setNoteLinkQuery(e.target.value)}
+                         placeholder="Buscar nota..."
+                         className="w-full bg-slate-800 border border-slate-600 rounded px-2 py-1 text-sm text-slate-300 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500 mb-2"
+                       />
+                       
+                       <div className="max-h-40 overflow-y-auto space-y-1">
+                         {notes
+                           .filter(note => 
+                             note.title.toLowerCase().includes(noteLinkQuery.toLowerCase())
+                           )
+                           .slice(0, 6)
+                           .map(note => (
+                             <button
+                               key={note.id}
+                               onClick={() => {
+                                 addTodo(inputValue, inputPriority, undefined, note.id);
+                               }}
+                               className="w-full text-left text-xs px-2 py-1 rounded flex items-center gap-2 text-slate-300 hover:bg-slate-700"
+                             >
+                               <DocumentIcon className="w-3 h-3 text-indigo-400" />
+                               <span className="truncate flex-1">{note.title}</span>
+                               <span className="text-slate-500">
+                                 {noteFolders.find(f => f.id === note.folderId)?.name || 'Sin carpeta'}
+                               </span>
+                             </button>
+                           ))}
+                         {notes.length === 0 && (
+                           <p className="text-xs text-slate-500 text-center py-2">
+                             No hay notas disponibles
+                           </p>
+                         )}
+                       </div>
+                     </div>
+                   )}
 
                  </div>
               ) : (
@@ -763,6 +838,9 @@ function App() {
                       todo={todo} 
                       onUpdate={handleUpdateTodo}
                       onDelete={deleteTodo} 
+                      notes={notes}
+                      noteFolders={noteFolders}
+                      onOpenNote={handleOpenNote}
                     />
                   ))}
                 </div>

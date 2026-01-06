@@ -186,7 +186,7 @@ export const LiveVoiceAgent: React.FC<LiveVoiceAgentProps> = ({ todos, addTodo, 
 
             // Handle Function Calls
             const toolCall = message.toolCall;
-            if (toolCall) {
+            if (toolCall?.functionCalls) {
               for (const fc of toolCall.functionCalls) {
                 console.log("Tool Call:", fc.name, fc.args);
                 let result: any = { status: 'ok' };

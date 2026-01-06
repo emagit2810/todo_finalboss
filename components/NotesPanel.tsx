@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { NoteDoc, NoteFolder } from '../types';
-import { DocumentIcon, FolderIcon, PlusIcon, TrashIcon, ChevronDownIcon, ChevronRightIcon, ArrowsCollapseIcon, ArrowsExpandIcon } from './Icons';
+import { NoteDoc, NoteFolder, Todo, Priority } from '../types';
+import { DocumentIcon, FolderIcon, PlusIcon, TrashIcon, ChevronDownIcon, ChevronRightIcon, ArrowsCollapseIcon, ArrowsExpandIcon, XMarkIcon } from './Icons';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
 import { deriveKeyAndHash, decryptWithKey, encryptWithKey, generateSalt } from '../utils/crypto';
@@ -14,6 +14,10 @@ interface NotesPanelProps {
   onAddFolder: (folder: NoteFolder) => void;
   onUpdateFolder: (folder: NoteFolder) => void;
   onDeleteFolder: (id: string) => void;
+  openNoteId?: string | null;
+  onConsumeOpenNoteId?: () => void;
+  todos?: Todo[];
+  onUpdateTodo?: (todo: Todo) => void;
 }
 
 const PASSWORD_ITERATIONS = 100000;
@@ -50,6 +54,10 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
   onAddFolder,
   onUpdateFolder,
   onDeleteFolder,
+  openNoteId,
+  onConsumeOpenNoteId,
+  todos = [],
+  onUpdateTodo,
 }) => {
   const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
@@ -73,6 +81,13 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
   const [folderPassword, setFolderPassword] = useState('');
   const [localError, setLocalError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  
+  // States for task linking
+  const [isTaskLinkerOpen, setIsTaskLinkerOpen] = useState(false);
+  const [selectedPriority, setSelectedPriority] = useState<Priority | 'all'>('all');
+  const [taskQuery, setTaskQuery] = useState('');
+  const [linkTaskOnCreate, setLinkTaskOnCreate] = useState(false);
+  
   const cryptoReady = typeof crypto !== 'undefined' && !!crypto.subtle;
 
   const saveTimerRef = useRef<number | null>(null);
@@ -113,6 +128,71 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
   }, [notes]);
 
   const draftTagList = useMemo(() => normalizeTags(draftTags), [draftTags]);
+
+  // Memoized filtered todos for task linking
+  const filteredTodos = useMemo(() => {
+    let list = todos.filter(todo => !todo.completed);
+    
+    // Filter by priority
+    if (selectedPriority !== 'all') {
+      list = list.filter(todo => todo.priority === selectedPriority);
+    }
+    
+    // Filter by search query
+    if (taskQuery.trim()) {
+      const query = taskQuery.toLowerCase();
+      list = list.filter(todo => 
+        todo.text.toLowerCase().includes(query) ||
+        todo.description?.toLowerCase().includes(query)
+      );
+    }
+    
+    // Sort by priority first, then by creation date
+    return list.sort((a, b) => {
+      const priorityOrder = { 'P1': 0, 'P2': 1, 'P3': 2, 'P4': 3 };
+      const aPriority = priorityOrder[a.priority];
+      const bPriority = priorityOrder[b.priority];
+      
+      if (aPriority !== bPriority) {
+        return aPriority - bPriority;
+      }
+      
+      return a.createdAt - b.createdAt;
+    });
+  }, [todos, selectedPriority, taskQuery]);
+
+  // Get task number for display
+  const getTaskNumber = (todo: Todo, allTodos: Todo[]) => {
+    const priorityOrder = { 'P1': 0, 'P2': 1, 'P3': 2, 'P4': 3 };
+    const sortedTodos = allTodos
+      .filter(t => !t.completed)
+      .sort((a, b) => {
+        const aPriority = priorityOrder[a.priority];
+        const bPriority = priorityOrder[b.priority];
+        if (aPriority !== bPriority) return aPriority - bPriority;
+        return a.createdAt - b.createdAt;
+      });
+    
+    return sortedTodos.findIndex(t => t.id === todo.id) + 1;
+  };
+
+  const linkTaskToNote = (todoId: string) => {
+    if (!activeNoteId || !onUpdateTodo) return;
+    
+    const todo = todos.find(t => t.id === todoId);
+    if (!todo) return;
+    
+    const currentLinkedNotes = new Set(todo.linkedNotes || []);
+    currentLinkedNotes.add(activeNoteId);
+    
+    onUpdateTodo({
+      ...todo,
+      linkedNotes: Array.from(currentLinkedNotes)
+    });
+    
+    setIsTaskLinkerOpen(false);
+    setTaskQuery('');
+  };
 
   const filteredNotes = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -181,6 +261,55 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
   useEffect(() => {
     void loadNoteToDraft(activeNote);
   }, [activeNoteId]);
+
+  useEffect(() => {
+    if (!openNoteId) return;
+    const requestedNoteId = openNoteId;
+    onConsumeOpenNoteId?.();
+    const targetNote = notes.find((n) => n.id === requestedNoteId) || null;
+
+    const openRequestedNote = async () => {
+      await persistDraft();
+      if (!targetNote) {
+        setLocalError('Documento no encontrado.');
+        return;
+      }
+
+      const targetFolderId = targetNote.folderId ?? null;
+      if (targetFolderId) {
+        const folder = folderMap.get(targetFolderId);
+        const locked = !!(folder && folder.locked && !unlockedFolderIds.includes(folder.id));
+        setActiveFolderId(targetFolderId);
+        setNotesTreeExpanded(true);
+
+        if (locked) {
+          setActiveNoteId(null);
+          setLocalError('Desbloquea la carpeta para abrir este documento.');
+          return;
+        }
+
+        const chain: string[] = [];
+        let current: string | null = targetFolderId;
+        while (current) {
+          chain.push(current);
+          const currentFolder = folderMap.get(current);
+          current = currentFolder?.parentId ?? null;
+        }
+        setExpandedFolderIds((prev) => {
+          const next = new Set(prev);
+          chain.forEach((id) => next.add(id));
+          return Array.from(next);
+        });
+      } else {
+        setActiveFolderId(null);
+        setNotesTreeExpanded(true);
+      }
+
+      setActiveNoteId(targetNote.id);
+    };
+
+    void openRequestedNote();
+  }, [openNoteId, notes, folderMap, unlockedFolderIds, onConsumeOpenNoteId]);
 
   const scheduleSave = () => {
     if (saveTimerRef.current) {
@@ -300,6 +429,12 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
     setNewNoteTitle('');
     setActiveNoteId(note.id);
     await loadNoteToDraft(note);
+    
+    // If link task mode is active, open the task linker
+    if (linkTaskOnCreate) {
+      setLinkTaskOnCreate(false);
+      setIsTaskLinkerOpen(true);
+    }
   };
 
   const handleDeleteCurrentNote = async () => {
@@ -715,8 +850,19 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
               className="flex-1 bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs focus:outline-none focus:border-emerald-500"
             />
             <button
-              onClick={handleCreateNote}
+              onClick={() => {
+                setLinkTaskOnCreate(true);
+                handleCreateNote();
+              }}
               className="px-2 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs"
+              title="Crear y vincular tarea"
+            >
+              <PlusIcon className="w-4 h-4" />
+            </button>
+            <button
+              onClick={handleCreateNote}
+              className="px-2 py-1 bg-slate-600 hover:bg-slate-500 text-white rounded text-xs"
+              title="Crear sin vincular"
             >
               <PlusIcon className="w-4 h-4" />
             </button>
@@ -849,6 +995,13 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
                       disabled={isNoteLocked}
                     />
                     <button
+                      onClick={() => setIsTaskLinkerOpen(!isTaskLinkerOpen)}
+                      className="p-2 rounded bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-200 border border-indigo-500/30"
+                      title="Vincular tarea"
+                    >
+                      <PlusIcon className="w-4 h-4" />
+                    </button>
+                    <button
                       onClick={handleDeleteCurrentNote}
                       className="p-2 rounded bg-rose-600/20 hover:bg-rose-600/30 text-rose-200 border border-rose-500/30"
                       title="Eliminar"
@@ -856,6 +1009,97 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
                       <TrashIcon className="w-4 h-4" />
                     </button>
                   </div>
+
+                  {/* Task Linker Panel */}
+                  {isTaskLinkerOpen && (
+                    <div className="mb-3 p-3 bg-slate-800/50 border border-slate-700 rounded-lg">
+                      <div className="flex items-center justify-between mb-2">
+                        <h4 className="text-sm font-medium text-slate-200">Vincular a tarea</h4>
+                        <button
+                          onClick={() => setIsTaskLinkerOpen(false)}
+                          className="text-slate-400 hover:text-slate-200"
+                        >
+                          <XMarkIcon className="w-4 h-4" />
+                        </button>
+                      </div>
+                      
+                      {/* Priority Filter */}
+                      <div className="flex gap-1 mb-2">
+                        <button
+                          onClick={() => setSelectedPriority('all')}
+                          className={`px-2 py-1 text-xs rounded ${
+                            selectedPriority === 'all' 
+                              ? 'bg-indigo-600 text-white' 
+                              : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                          }`}
+                        >
+                          Todas
+                        </button>
+                        {(['P1', 'P2', 'P3', 'P4'] as Priority[]).map(priority => (
+                          <button
+                            key={priority}
+                            onClick={() => setSelectedPriority(priority)}
+                            className={`px-2 py-1 text-xs rounded ${
+                              selectedPriority === priority 
+                                ? 'bg-indigo-600 text-white' 
+                                : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                            }`}
+                          >
+                            {priority}
+                          </button>
+                        ))}
+                      </div>
+                      
+                      {/* Search Input */}
+                      <input
+                        type="text"
+                        value={taskQuery}
+                        onChange={(e) => setTaskQuery(e.target.value)}
+                        placeholder="Buscar tarea..."
+                        className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1 text-sm text-slate-300 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500 mb-2"
+                      />
+                      
+                      {/* Task List */}
+                      <div className="max-h-32 overflow-y-auto space-y-1">
+                        {filteredTodos.slice(0, 8).map(todo => {
+                          const taskNumber = getTaskNumber(todo, todos);
+                          const isAlreadyLinked = activeNoteId ? todo.linkedNotes?.includes(activeNoteId) : false;
+                          
+                          return (
+                            <button
+                              key={todo.id}
+                              onClick={() => linkTaskToNote(todo.id)}
+                              disabled={isAlreadyLinked}
+                              className={`w-full text-left text-xs px-2 py-1 rounded flex items-center gap-2 ${
+                                isAlreadyLinked 
+                                  ? 'bg-slate-700 text-slate-500 cursor-not-allowed' 
+                                  : 'text-slate-300 hover:bg-slate-700'
+                              }`}
+                            >
+                              <span className={`font-mono text-xs ${
+                                todo.priority === 'P1' ? 'text-red-400' :
+                                todo.priority === 'P2' ? 'text-orange-400' :
+                                todo.priority === 'P3' ? 'text-blue-400' :
+                                'text-slate-500'
+                              }`}>
+                                {todo.priority}
+                              </span>
+                              <span className="font-mono text-slate-500">#{taskNumber}</span>
+                              <span className="truncate flex-1">{todo.text}</span>
+                              {isAlreadyLinked && (
+                                <span className="text-xs text-indigo-400">Ya vinculada</span>
+                              )}
+                            </button>
+                          );
+                        })}
+                        {filteredTodos.length === 0 && (
+                          <p className="text-xs text-slate-500 text-center py-2">
+                            No hay tareas disponibles
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
                   <textarea
                     value={draftContent}
                     onChange={(e) => setDraftContent(e.target.value)}

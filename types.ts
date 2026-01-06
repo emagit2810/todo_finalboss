@@ -18,6 +18,7 @@ export interface Todo {
   complexity?: number; // 1-10
   subtasks?: Subtask[];
   dueDate?: number; // Timestamp
+  linkedNotes?: string[];
 }
 
 export interface Medicine {

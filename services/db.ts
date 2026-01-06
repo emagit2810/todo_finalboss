@@ -35,9 +35,87 @@ interface TaskMasterDB extends DBSchema {
 const DB_NAME = 'gemini-task-master';
 const DB_VERSION = 2;
 
-let dbPromise: Promise<IDBPDatabase<TaskMasterDB>>;
+type StoreName = keyof TaskMasterDB;
+type StoreValue<K extends StoreName> = TaskMasterDB[K]['value'];
+
+let dbPromise: Promise<IDBPDatabase<TaskMasterDB> | null> | null = null;
+let dbFailed = false;
+let fallbackWarned = false;
+
+const FALLBACK_PREFIX = `tm_fallback:${DB_NAME}:`;
+const memoryFallback = new Map<string, string>();
+
+const warnFallbackOnce = (error: unknown) => {
+  if (fallbackWarned) return;
+  fallbackWarned = true;
+  console.warn('IndexedDB unavailable, using localStorage fallback.', error);
+};
+
+const safeGetItem = (key: string) => {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return memoryFallback.get(key) ?? null;
+  }
+};
+
+const safeSetItem = (key: string, value: string) => {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    memoryFallback.set(key, value);
+  }
+};
+
+const safeRemoveItem = (key: string) => {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    memoryFallback.delete(key);
+  }
+};
+
+const readStore = <K extends StoreName>(storeName: K): Record<string, StoreValue<K>> => {
+  const raw = safeGetItem(`${FALLBACK_PREFIX}${storeName}`);
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as Record<string, StoreValue<K>>;
+  } catch {
+    return {};
+  }
+};
+
+const writeStore = <K extends StoreName>(storeName: K, data: Record<string, StoreValue<K>>) => {
+  safeSetItem(`${FALLBACK_PREFIX}${storeName}`, JSON.stringify(data));
+};
+
+const fallbackGetAll = <K extends StoreName>(storeName: K): StoreValue<K>[] => {
+  return Object.values(readStore(storeName));
+};
+
+const fallbackPutItem = <K extends StoreName>(storeName: K, item: StoreValue<K>) => {
+  const data = readStore(storeName);
+  const key = (item as { id?: string }).id || crypto.randomUUID();
+  data[key] = { ...(item as StoreValue<K>), id: key };
+  writeStore(storeName, data);
+  return key;
+};
+
+const fallbackDeleteItem = <K extends StoreName>(storeName: K, id: string) => {
+  const data = readStore(storeName);
+  if (data[id]) {
+    delete data[id];
+    writeStore(storeName, data);
+  } else {
+    safeRemoveItem(`${FALLBACK_PREFIX}${storeName}`);
+    writeStore(storeName, data);
+  }
+};
 
 export const initDB = () => {
+  if (dbFailed) {
+    return Promise.resolve(null);
+  }
   if (!dbPromise) {
     dbPromise = openDB<TaskMasterDB>(DB_NAME, DB_VERSION, {
       upgrade(db) {
@@ -63,6 +141,10 @@ export const initDB = () => {
           db.createObjectStore('ai_planner_results', { keyPath: 'id' });
         }
       },
+    }).catch((error) => {
+      dbFailed = true;
+      warnFallbackOnce(error);
+      return null;
     });
   }
   return dbPromise;
@@ -70,37 +152,100 @@ export const initDB = () => {
 
 // --- Generic Helpers ---
 
-export const getAll = async <K extends keyof TaskMasterDB>(storeName: K): Promise<TaskMasterDB[K]['value'][]> => {
+export const getAll = async <K extends StoreName>(storeName: K): Promise<StoreValue<K>[]> => {
   const db = await initDB();
-  return db.getAll(storeName as any);
+  if (!db) {
+    return fallbackGetAll(storeName);
+  }
+  try {
+    return await db.getAll(storeName as any);
+  } catch (error) {
+    dbFailed = true;
+    warnFallbackOnce(error);
+    return fallbackGetAll(storeName);
+  }
 };
 
-export const putItem = async <K extends keyof TaskMasterDB>(storeName: K, item: TaskMasterDB[K]['value']) => {
+export const putItem = async <K extends StoreName>(storeName: K, item: StoreValue<K>) => {
   const db = await initDB();
-  return db.put(storeName as any, item);
+  if (!db) {
+    return fallbackPutItem(storeName, item);
+  }
+  try {
+    return await db.put(storeName as any, item);
+  } catch (error) {
+    dbFailed = true;
+    warnFallbackOnce(error);
+    return fallbackPutItem(storeName, item);
+  }
 };
 
-export const deleteItem = async <K extends keyof TaskMasterDB>(storeName: K, id: string) => {
+export const deleteItem = async <K extends StoreName>(storeName: K, id: string) => {
   const db = await initDB();
-  return db.delete(storeName as any, id);
+  if (!db) {
+    fallbackDeleteItem(storeName, id);
+    return;
+  }
+  try {
+    await db.delete(storeName as any, id);
+  } catch (error) {
+    dbFailed = true;
+    warnFallbackOnce(error);
+    fallbackDeleteItem(storeName, id);
+  }
 };
 
 // --- Specific Logic (if needed) ---
 
 export const softDeleteTodo = async (todo: Todo) => {
     const db = await initDB();
-    const tx = db.transaction(['todos', 'deleted_todos'], 'readwrite');
-    await tx.objectStore('todos').delete(todo.id);
-    await tx.objectStore('deleted_todos').put(todo);
-    return tx.done;
+    if (!db) {
+        const todos = readStore('todos');
+        const deleted = readStore('deleted_todos');
+        if (todos[todo.id]) {
+            delete todos[todo.id];
+            writeStore('todos', todos);
+        }
+        deleted[todo.id] = todo;
+        writeStore('deleted_todos', deleted);
+        return;
+    }
+    try {
+        const tx = db.transaction(['todos', 'deleted_todos'], 'readwrite');
+        await tx.objectStore('todos').delete(todo.id);
+        await tx.objectStore('deleted_todos').put(todo);
+        return tx.done;
+    } catch (error) {
+        dbFailed = true;
+        warnFallbackOnce(error);
+        const todos = readStore('todos');
+        const deleted = readStore('deleted_todos');
+        if (todos[todo.id]) {
+            delete todos[todo.id];
+            writeStore('todos', todos);
+        }
+        deleted[todo.id] = todo;
+        writeStore('deleted_todos', deleted);
+    }
 };
 
 export const saveAIResult = async (query: string, resultText: string) => {
-    const db = await initDB();
-    await db.put('ai_planner_results', {
+    const payload = {
         id: crypto.randomUUID(),
         query,
         resultText,
         timestamp: Date.now()
-    });
+    };
+    const db = await initDB();
+    if (!db) {
+        fallbackPutItem('ai_planner_results', payload);
+        return;
+    }
+    try {
+        await db.put('ai_planner_results', payload);
+    } catch (error) {
+        dbFailed = true;
+        warnFallbackOnce(error);
+        fallbackPutItem('ai_planner_results', payload);
+    }
 }
