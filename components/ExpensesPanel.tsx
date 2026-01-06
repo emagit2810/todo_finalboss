@@ -158,7 +158,7 @@ export const ExpensesPanel: React.FC<ExpensesPanelProps> = ({ expenses, onAdd, o
       </div>
 
       {/* Summaries */}
-      <div className="grid md:grid-cols-2 gap-6 mb-8">
+      <div className="grid md:grid-cols-2 gap-6 mb-8">  
         {/* Category A Summary */}
         <div className="bg-indigo-900/20 rounded-xl p-6 border border-indigo-500/30 backdrop-blur-sm">
           <h2 className="text-lg font-bold text-indigo-300 mb-4">Emmanuel (personal)</h2>

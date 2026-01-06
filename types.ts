@@ -39,12 +39,41 @@ export interface Expense {
   date: number;
 }
 
+export interface NoteFolder {
+  id: string;
+  name: string;
+  parentId?: string | null;
+  createdAt: number;
+  updatedAt: number;
+  locked?: boolean;
+  lockSalt?: string;
+  lockHash?: string;
+  lockIterations?: number;
+}
+
+export interface NoteDoc {
+  id: string;
+  title: string;
+  content?: string;
+  folderId?: string | null;
+  tags?: string[];
+  createdAt: number;
+  updatedAt: number;
+  locked?: boolean;
+  encryptedContent?: string;
+  iv?: string;
+  salt?: string;
+  lockHash?: string;
+  lockIterations?: number;
+}
+
 export enum ViewMode {
   LIST = 'LIST',
   CALENDAR = 'CALENDAR',
   BRAINSTORM = 'BRAINSTORM',
   MEDICINES = 'MEDICINES',
   EXPENSES = 'EXPENSES',
+  NOTES = 'NOTES',
 }
 
 export interface AudioConfig {

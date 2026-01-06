@@ -1,17 +1,32 @@
 
-import React, { useState, useEffect, useCallback } from 'react';
-import { Todo, ViewMode, Medicine, Expense, Priority, Subtask } from './types';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Todo, ViewMode, Medicine, Expense, Priority, Subtask, NoteDoc, NoteFolder } from './types';
 import { TodoItem } from './components/TodoItem';
 import { brainstormTasks } from './services/geminiService';
 import { PlusIcon, BrainIcon, ArrowsExpandIcon, ArrowsCollapseIcon, FlagIcon, BellIcon, ClockIcon } from './components/Icons';
 import { MedicinePanel } from './components/MedicinePanel';
 import { ExpensesPanel } from './components/ExpensesPanel';
 import { CalendarPanel } from './components/CalendarPanel';
+import { NotesPanel } from './components/NotesPanel';
 import { Sidebar } from './components/Sidebar';
 import * as db from './services/db';
-import { sendReminder } from './services/reminderService';
+import { sendReminder, tryOpenWhatsAppLink } from './services/reminderService';
 import { Toast } from './components/Toast';
 import { VoiceDictation } from './components/VoiceDictation';
+
+type LocalNotificationItem = {
+  id: string;
+  message: string;
+  createdAt: number;
+  read: boolean;
+};
+
+type ReminderOptions = {
+  sendToApi: boolean;
+  openWhatsApp: boolean;
+  createTaskFromResponse: boolean;
+  localNotification: boolean;
+};
 
 function App() {
   // --- State: Todos ---
@@ -24,6 +39,10 @@ function App() {
   // --- State: Expenses ---
   const [expenses, setExpenses] = useState<Expense[]>([]);
 
+  // --- State: Notes ---
+  const [notes, setNotes] = useState<NoteDoc[]>([]);
+  const [noteFolders, setNoteFolders] = useState<NoteFolder[]>([]);
+
   // --- State: UI ---
   const [inputValue, setInputValue] = useState('');
   const [inputPriority, setInputPriority] = useState<Priority>('P4'); // Default priority for new task
@@ -35,10 +54,21 @@ function App() {
   const [brainstormSources, setBrainstormSources] = useState<Array<{uri: string, title: string}>>([]);
 
   // --- State: Reminder / Notification ---
-  const [showReminderInput, setShowReminderInput] = useState(false);
+  const [isReminderPanelOpen, setIsReminderPanelOpen] = useState(false);
   const [reminderText, setReminderText] = useState('');
+  const [reminderEdited, setReminderEdited] = useState(false);
   const [reminderLoading, setReminderLoading] = useState(false);
+  const [reminderDelayMinutes, setReminderDelayMinutes] = useState(5);
+  const [reminderOptions, setReminderOptions] = useState<ReminderOptions>({
+    sendToApi: true,
+    openWhatsApp: false,
+    createTaskFromResponse: false,
+    localNotification: false,
+  });
   const [notification, setNotification] = useState<{ message: string, type: 'success' | 'error', sticky?: boolean } | null>(null);
+  const [notificationCenterOpen, setNotificationCenterOpen] = useState(false);
+  const [notificationInbox, setNotificationInbox] = useState<LocalNotificationItem[]>([]);
+  const reminderTimeoutsRef = useRef<number[]>([]);
 
   // --- Initialization (Load from IndexedDB) ---
   useEffect(() => {
@@ -124,6 +154,13 @@ function App() {
             }
             setExpenses(loadedExpenses);
 
+            // Load Notes + Folders
+            const loadedFolders = await db.getAll('note_folders');
+            setNoteFolders(loadedFolders);
+            const loadedNotes = await db.getAll('notes');
+            const sortedNotes = loadedNotes.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+            setNotes(sortedNotes);
+
         } catch (error) {
             console.error("Failed to load data from DB", error);
         }
@@ -160,7 +197,8 @@ function App() {
     setInputPriority('P4'); // Reset to default
     setInputDueDate(''); // Reset date
     setReminderText(''); // Reset reminder
-    setShowReminderInput(false);
+    setReminderEdited(false);
+    setIsReminderPanelOpen(false);
     
     // DB Update
     await db.putItem('todos', newTodo);
@@ -182,6 +220,79 @@ function App() {
         await db.softDeleteTodo(todoToDelete);
     }
   }, [todos]);
+
+  const parseSubtasksFromText = (text: string): Subtask[] => {
+    const lines = text.split('\n').filter(l => l.trim().length > 0);
+    const newSubtasks: Subtask[] = [];
+    for (const line of lines) {
+      const cleanText = line.replace(/^[\d\.\-\*\s]+/, '').trim();
+      if (cleanText && cleanText.length > 2) {
+        newSubtasks.push({
+          id: crypto.randomUUID(),
+          text: cleanText,
+          completed: false
+        });
+      }
+    }
+    return newSubtasks;
+  };
+
+  const openReminderPanel = useCallback(() => {
+    setIsReminderPanelOpen(true);
+    setReminderEdited(false);
+    setReminderText(inputValue);
+  }, [inputValue]);
+
+  const closeReminderPanel = useCallback(() => {
+    setIsReminderPanelOpen(false);
+    setReminderEdited(false);
+  }, []);
+
+  const toggleNotificationCenter = () => {
+    setNotificationCenterOpen((prev) => {
+      const next = !prev;
+      if (!prev && next) {
+        setNotificationInbox(items => items.map(item => ({ ...item, read: true })));
+      }
+      return next;
+    });
+  };
+
+  const scheduleLocalNotification = (message: string, delayMinutes: number) => {
+    const safeDelay = Math.max(0, Math.round(delayMinutes));
+    const delayMs = safeDelay * 60 * 1000;
+    const timeoutId = window.setTimeout(() => {
+      setNotificationInbox(prev => [
+        {
+          id: crypto.randomUUID(),
+          message,
+          createdAt: Date.now(),
+          read: false
+        },
+        ...prev
+      ]);
+    }, delayMs);
+    reminderTimeoutsRef.current.push(timeoutId);
+  };
+
+  const updateReminderOption = (key: keyof ReminderOptions, checked: boolean) => {
+    setReminderOptions(prev => ({ ...prev, [key]: checked }));
+  };
+
+  useEffect(() => {
+    if (!isReminderPanelOpen) return;
+    if (reminderEdited) return;
+    if (reminderText !== inputValue) {
+      setReminderText(inputValue);
+    }
+  }, [inputValue, isReminderPanelOpen, reminderEdited, reminderText]);
+
+  useEffect(() => {
+    return () => {
+      reminderTimeoutsRef.current.forEach(id => clearTimeout(id));
+      reminderTimeoutsRef.current = [];
+    };
+  }, []);
 
   // --- Handlers: Medicines ---
   const handleAddMedicine = async (med: Medicine) => {
@@ -215,42 +326,131 @@ function App() {
       await db.deleteItem('expenses', id);
   };
 
-  // --- Handler: Reminder ---
+  // --- Handlers: Notes ---
+  const handleAddNote = async (note: NoteDoc) => {
+      setNotes(prev => [note, ...prev]);
+      await db.putItem('notes', note);
+  };
+
+  const handleUpdateNote = async (updatedNote: NoteDoc) => {
+      setNotes(prev => prev.map(n => n.id === updatedNote.id ? updatedNote : n));
+      await db.putItem('notes', updatedNote);
+  };
+
+  const handleDeleteNote = async (id: string) => {
+      setNotes(prev => prev.filter(n => n.id !== id));
+      await db.deleteItem('notes', id);
+  };
+
+  const handleAddNoteFolder = async (folder: NoteFolder) => {
+      setNoteFolders(prev => [...prev, folder]);
+      await db.putItem('note_folders', folder);
+  };
+
+  const handleUpdateNoteFolder = async (updatedFolder: NoteFolder) => {
+      setNoteFolders(prev => prev.map(f => f.id === updatedFolder.id ? updatedFolder : f));
+      await db.putItem('note_folders', updatedFolder);
+  };
+
+  const handleDeleteNoteFolder = async (id: string) => {
+      setNoteFolders(prev => prev.filter(f => f.id !== id));
+      await db.deleteItem('note_folders', id);
+      const affectedNotes = notes.filter(n => n.folderId === id);
+      if (affectedNotes.length > 0) {
+        const timestamp = Date.now();
+        const updatedNotes = affectedNotes.map(n => ({ ...n, folderId: null, updatedAt: timestamp }));
+        setNotes(prev => prev.map(n => n.folderId === id ? { ...n, folderId: null, updatedAt: timestamp } : n));
+        for (const note of updatedNotes) {
+          await db.putItem('notes', note);
+        }
+      }
+  };
+
+    // --- Handler: Reminder (panel actions) ---
   const handleSendReminder = async () => {
-      const textToSend = reminderText || inputValue;
+      const textToSend = (reminderText || inputValue).trim();
       if (!textToSend) {
           setNotification({ message: 'Please enter text for the reminder', type: 'error' });
           return;
       }
-      
-      setReminderLoading(true);
-      const res = await sendReminder(textToSend, { priority: inputPriority, type: 'TODO' });
-      setReminderLoading(false);
-      
-      if (res.success) {
-          const reminderTextFromApi = res.reminderText || res.data?.reminder_text || textToSend;
-          // Notificación pegajosa hasta que el usuario la cierre
-          setNotification({ message: reminderTextFromApi, type: 'success', sticky: true });
 
-          // Crear una nueva tarea a partir del recordatorio devuelto
-          const newTodo: Todo = {
-              id: crypto.randomUUID(),
-              text: reminderTextFromApi,
-              completed: false,
-              createdAt: Date.now(),
-              priority: inputPriority,
-              complexity: 1,
-              subtasks: [],
-              dueDate: undefined
-          };
-          setTodos(prev => [newTodo, ...prev]);
-          await db.putItem('todos', newTodo);
-
-          setReminderText('');
-          setShowReminderInput(false);
-      } else {
-          setNotification({ message: res.message, type: 'error' });
+      const hasAnyAction = Object.values(reminderOptions).some(Boolean);
+      if (!hasAnyAction) {
+          setNotification({ message: 'Selecciona al menos una accion', type: 'error' });
+          return;
       }
+
+      const needsApi =
+        reminderOptions.sendToApi ||
+        reminderOptions.createTaskFromResponse;
+
+      let res = null as any;
+
+      if (needsApi) {
+        setReminderLoading(true);
+        res = await sendReminder(textToSend, { priority: inputPriority, type: 'TODO' });
+        setReminderLoading(false);
+
+        if (!res?.success) {
+          setNotification({ message: res?.message || 'Failed to send', type: 'error' });
+          return;
+        }
+
+        setNotification({ message: 'Recibido', type: 'success' });
+      }
+
+      if (reminderOptions.openWhatsApp) {
+        let link =
+          res?.whatsappLink ||
+          res?.data?.whatsapp_link ||
+          res?.data?.whatsappLink;
+        if (!link) {
+          link = `https://wa.me/?text=${encodeURIComponent(textToSend)}`;
+        }
+        const opened = tryOpenWhatsAppLink(link);
+        if (link && !opened) {
+          setNotification({ message: 'No se pudo abrir WhatsApp', type: 'error' });
+        }
+      }
+
+      if (reminderOptions.createTaskFromResponse) {
+        const responseText =
+          res?.reminderText ||
+          res?.data?.reminder_text ||
+          textToSend;
+        const subtasks = parseSubtasksFromText(responseText);
+        const finalSubtasks = subtasks.length > 0
+          ? subtasks
+          : responseText
+            ? [{
+                id: crypto.randomUUID(),
+                text: responseText,
+                completed: false
+              }]
+            : [];
+
+        const newTodo: Todo = {
+          id: crypto.randomUUID(),
+          text: textToSend,
+          completed: false,
+          createdAt: Date.now(),
+          priority: inputPriority,
+          complexity: Math.max(1, Math.min(10, Math.ceil(finalSubtasks.length / 2))),
+          subtasks: finalSubtasks,
+          description: responseText,
+          dueDate: undefined
+        };
+        setTodos(prev => [newTodo, ...prev]);
+        await db.putItem('todos', newTodo);
+      }
+
+      if (reminderOptions.localNotification) {
+        scheduleLocalNotification(textToSend, reminderDelayMinutes);
+      }
+
+      setReminderText('');
+      setReminderEdited(false);
+      setIsReminderPanelOpen(false);
   };
 
 
@@ -289,20 +489,7 @@ function App() {
     await db.saveAIResult(brainstormQuery, result.text);
 
     // Parse the list output from Gemini into Subtasks
-    const lines = result.text.split('\n').filter(l => l.trim().length > 0);
-    const newSubtasks: Subtask[] = [];
-
-    for (const line of lines) {
-      // Remove markdown bullets, numbers, etc.
-      const cleanText = line.replace(/^[\d\.\-\*\s]+/, '').trim();
-      if (cleanText && cleanText.length > 2) {
-        newSubtasks.push({
-            id: crypto.randomUUID(),
-            text: cleanText,
-            completed: false
-        });
-      }
-    }
+    const newSubtasks = parseSubtasksFromText(result.text);
 
     // Create a single Todo item containing all generated steps
     if (newSubtasks.length > 0) {
@@ -332,9 +519,9 @@ function App() {
   // --- Quick navigation shortcuts (used from Calendar modal) ---
   const openReminderFromCalendar = useCallback(() => {
     setViewMode(ViewMode.LIST);
-    setShowReminderInput(true);
+    openReminderPanel();
     setIsInputExpanded(true);
-  }, []);
+  }, [openReminderPanel]);
 
   const openMedicinesFromCalendar = useCallback(() => {
     setViewMode(ViewMode.MEDICINES);
@@ -385,6 +572,21 @@ function App() {
         );
     }
 
+    if (viewMode === ViewMode.NOTES) {
+        return (
+            <NotesPanel
+                notes={notes}
+                folders={noteFolders}
+                onAddNote={handleAddNote}
+                onUpdateNote={handleUpdateNote}
+                onDeleteNote={handleDeleteNote}
+                onAddFolder={handleAddNoteFolder}
+                onUpdateFolder={handleUpdateNoteFolder}
+                onDeleteFolder={handleDeleteNoteFolder}
+            />
+        );
+    }
+
     // Filtered Todos
     const filteredTodos = filterPriority === 'ALL' 
         ? todos 
@@ -414,7 +616,7 @@ function App() {
             {/* Input Section */}
             <div className="mb-8">
               {viewMode === ViewMode.LIST ? (
-                 <div className={`relative transition-all duration-300 ease-in-out ${isInputExpanded || showReminderInput ? 'h-48' : 'h-24 sm:h-20'}`}>
+                 <div className={`relative transition-all duration-300 ease-in-out ${isInputExpanded ? 'h-48' : 'h-24 sm:h-20'}`}>
                    <textarea 
                      value={inputValue}
                      onChange={(e) => setInputValue(e.target.value)}
@@ -445,9 +647,9 @@ function App() {
 
                      {/* Reminder Button (Toggles extra input) */}
                      <button
-                        onClick={() => setShowReminderInput(!showReminderInput)}
-                        className={`p-2 rounded-lg transition-colors ${showReminderInput ? 'text-indigo-400 bg-indigo-500/20' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-                        title="Add Reminder Note"
+                        onClick={() => (isReminderPanelOpen ? closeReminderPanel() : openReminderPanel())}
+                        className={`p-2 rounded-lg transition-colors ${isReminderPanelOpen ? 'text-indigo-400 bg-indigo-500/20' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
+                        title="Open Reminder Panel"
                      >
                          <BellIcon className="w-5 h-5" />
                      </button>
@@ -502,29 +704,6 @@ function App() {
                        <PlusIcon className="w-5 h-5" />
                      </button>
                    </div>
-
-                   {/* Reminder Popover / Extra Input */}
-                   {showReminderInput && (
-                       <div className="absolute bottom-16 right-0 w-full sm:w-96 bg-slate-800 border border-slate-700 rounded-xl p-3 shadow-2xl z-30 animate-in slide-in-from-bottom-2">
-                           <div className="flex gap-2">
-                               <input 
-                                    type="text"
-                                    value={reminderText}
-                                    onChange={(e) => setReminderText(e.target.value)}
-                                    placeholder="Message for AI Reminder..."
-                                    className="flex-1 bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
-                               />
-                               <button 
-                                    onClick={handleSendReminder}
-                                    disabled={reminderLoading}
-                                    className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1 rounded text-sm font-medium disabled:opacity-50"
-                               >
-                                   {reminderLoading ? '...' : 'Send'}
-                               </button>
-                           </div>
-                           <p className="text-[10px] text-slate-500 mt-1">Sends notification to configured endpoint</p>
-                       </div>
-                   )}
 
                  </div>
               ) : (
@@ -592,6 +771,8 @@ function App() {
     );
   };
 
+  const unreadCount = notificationInbox.filter(n => !n.read).length;
+
   return (
     <div className="flex h-screen bg-slate-950 text-slate-100 font-sans selection:bg-primary-500/30 overflow-hidden relative">
       {/* Toast Notification Layer */}
@@ -604,12 +785,55 @@ function App() {
         />
       )}
 
+      {/* Notification Center (top-right) */}
+      <div className="fixed top-4 right-4 z-[70]">
+        <button
+          onClick={toggleNotificationCenter}
+          className="relative p-2 rounded-full bg-slate-900/80 border border-slate-800 hover:bg-slate-800 transition-colors"
+          title="Notifications"
+        >
+          <BellIcon className="w-5 h-5 text-slate-200" />
+          {unreadCount > 0 && (
+            <span className="absolute -top-1 -right-1 bg-rose-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">
+              {unreadCount}
+            </span>
+          )}
+        </button>
+
+        {notificationCenterOpen && (
+          <div className="mt-2 w-72 max-h-80 overflow-y-auto rounded-xl border border-slate-800 bg-slate-900/95 shadow-2xl p-3">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs uppercase tracking-wider text-slate-400">Notificaciones</p>
+              <button
+                onClick={() => setNotificationCenterOpen(false)}
+                className="text-slate-500 hover:text-white text-xs"
+              >
+                Cerrar
+              </button>
+            </div>
+            {notificationInbox.length === 0 && (
+              <p className="text-sm text-slate-500">Sin notificaciones.</p>
+            )}
+            {notificationInbox.map(item => (
+              <div key={item.id} className="border border-slate-800 rounded-lg p-2 mb-2 last:mb-0 bg-slate-950/40">
+                <p className="text-sm text-slate-200">{item.message}</p>
+                <p className="text-[10px] text-slate-500 mt-1">
+                  {new Date(item.createdAt).toLocaleTimeString()}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* Sidebar Navigation */}
       <Sidebar 
         currentView={viewMode} 
         setViewMode={setViewMode} 
         currentPriorityFilter={filterPriority}
         setPriorityFilter={setFilterPriority}
+        noteFolders={noteFolders}
+        notes={notes}
       />
 
       {/* Main Content Area */}
@@ -635,10 +859,144 @@ function App() {
                 </div>
            )}
 
+           {viewMode === ViewMode.NOTES && (
+                <div className="max-w-5xl mx-auto mb-8">
+                    <h2 className="text-3xl font-bold text-white mb-1 bg-gradient-to-r from-emerald-400 to-teal-400 bg-clip-text text-transparent inline-block">
+                        Notas
+                    </h2>
+                    <p className="text-slate-400 text-sm">Documentos y carpetas estilo Notion.</p>
+                </div>
+           )}
+
            {renderContent()}
       </main>
+
+      {/* Reminder Actions Panel */}
+      {isReminderPanelOpen && (
+        <div
+          className="fixed inset-0 z-[90] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+          onClick={closeReminderPanel}
+        >
+          <div
+            className="w-[90vw] sm:w-[70vw] md:w-[50vw] lg:w-[40vw] bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-wider text-slate-500">Reminder</p>
+                <h3 className="text-xl font-bold text-white">Acciones del reminder</h3>
+                <p className="text-xs text-slate-500 mt-1">Selecciona que quieres ejecutar.</p>
+              </div>
+              <button
+                onClick={closeReminderPanel}
+                className="text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg px-3 py-1"
+              >
+                Cerrar
+              </button>
+            </div>
+
+            <div className="mt-4">
+              <label className="block text-xs uppercase tracking-wider text-slate-500 mb-2">Mensaje</label>
+              <textarea
+                value={reminderText}
+                onChange={(e) => {
+                  setReminderText(e.target.value);
+                  setReminderEdited(true);
+                }}
+                placeholder="Escribe el mensaje del reminder..."
+                className="w-full min-h-[120px] bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 focus:outline-none focus:border-indigo-500"
+              />
+              <p className="text-[10px] text-slate-500 mt-2">Se sincroniza con el texto de la tarea si no editas aqui.</p>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              <label className="flex items-start gap-3 p-3 rounded-lg border border-slate-800 bg-slate-950/40">
+                <input
+                  type="checkbox"
+                  checked={reminderOptions.sendToApi}
+                  onChange={(e) => updateReminderOption('sendToApi', e.target.checked)}
+                  className="mt-1"
+                />
+                <div>
+                  <p className="text-sm text-slate-200">Enviar a FastAPI</p>
+                  <p className="text-xs text-slate-500">Hace POST al endpoint /reminder.</p>
+                </div>
+              </label>
+
+              <label className="flex items-start gap-3 p-3 rounded-lg border border-slate-800 bg-slate-950/40">
+                <input
+                  type="checkbox"
+                  checked={reminderOptions.openWhatsApp}
+                  onChange={(e) => updateReminderOption('openWhatsApp', e.target.checked)}
+                  className="mt-1"
+                />
+                <div>
+                  <p className="text-sm text-slate-200">Abrir WhatsApp</p>
+                  <p className="text-xs text-slate-500">Abre una nueva pestana con el link de WhatsApp.</p>
+                </div>
+              </label>
+
+              <label className="flex items-start gap-3 p-3 rounded-lg border border-slate-800 bg-slate-950/40">
+                <input
+                  type="checkbox"
+                  checked={reminderOptions.createTaskFromResponse}
+                  onChange={(e) => updateReminderOption('createTaskFromResponse', e.target.checked)}
+                  className="mt-1"
+                />
+                <div>
+                  <p className="text-sm text-slate-200">Crear tarea con respuesta</p>
+                  <p className="text-xs text-slate-500">Convierte la respuesta en subtareas automaticamente.</p>
+                </div>
+              </label>
+
+              <label className="flex items-start gap-3 p-3 rounded-lg border border-slate-800 bg-slate-950/40">
+                <input
+                  type="checkbox"
+                  checked={reminderOptions.localNotification}
+                  onChange={(e) => updateReminderOption('localNotification', e.target.checked)}
+                  className="mt-1"
+                />
+                <div className="flex-1">
+                  <p className="text-sm text-slate-200">Notificacion local programada</p>
+                  <p className="text-xs text-slate-500">Aparece en el centro de notificaciones de la web.</p>
+                  {reminderOptions.localNotification && (
+                    <div className="mt-2 flex items-center gap-2">
+                      <span className="text-xs text-slate-400">Minutos:</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={1440}
+                        value={reminderDelayMinutes}
+                        onChange={(e) => setReminderDelayMinutes(Number(e.target.value || 1))}
+                        className="w-20 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                  )}
+                </div>
+              </label>
+            </div>
+
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <button
+                onClick={closeReminderPanel}
+                className="px-4 py-2 rounded-lg bg-slate-800 text-slate-200 hover:bg-slate-700"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleSendReminder}
+                disabled={reminderLoading}
+                className="px-4 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-50"
+              >
+                {reminderLoading ? 'Enviando...' : 'Enviar'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 export default App;
+

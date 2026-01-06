@@ -1,17 +1,28 @@
 
-import React, { useState } from 'react';
-import { ViewMode, Priority } from '../types';
-import { ListBulletIcon, BrainIcon, PillIcon, BanknotesIcon, ChevronLeftIcon, ChevronRightIcon, FlagIcon, CalendarIcon } from './Icons';
+import React, { useMemo, useState } from 'react';
+import { ViewMode, Priority, NoteDoc, NoteFolder } from '../types';
+import { ListBulletIcon, BrainIcon, PillIcon, BanknotesIcon, ChevronLeftIcon, ChevronRightIcon, FlagIcon, CalendarIcon, DocumentIcon, ChevronDownIcon, FolderIcon } from './Icons';
 
 interface SidebarProps {
   currentView: ViewMode;
   setViewMode: (mode: ViewMode) => void;
   currentPriorityFilter: Priority | 'ALL';
   setPriorityFilter: (p: Priority | 'ALL') => void;
+  noteFolders?: NoteFolder[];
+  notes?: NoteDoc[];
 }
 
-export const Sidebar: React.FC<SidebarProps> = ({ currentView, setViewMode, currentPriorityFilter, setPriorityFilter }) => {
+export const Sidebar: React.FC<SidebarProps> = ({
+  currentView,
+  setViewMode,
+  currentPriorityFilter,
+  setPriorityFilter,
+  noteFolders = [],
+  notes = [],
+}) => {
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const [notesTreeExpanded, setNotesTreeExpanded] = useState(true);
+  const [expandedFolderIds, setExpandedFolderIds] = useState<string[]>([]);
 
   // Styles for Priorities
   const getPriorityColor = (p: Priority) => {
@@ -21,6 +32,34 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentView, setViewMode, curr
           case 'P3': return 'text-blue-400';
           default: return 'text-slate-500';
       }
+  };
+
+  const folderChildren = useMemo(() => {
+    const map = new Map<string | null, NoteFolder[]>();
+    noteFolders.forEach((folder) => {
+      const key = folder.parentId ?? null;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(folder);
+    });
+    map.forEach((list) => list.sort((a, b) => a.name.localeCompare(b.name)));
+    return map;
+  }, [noteFolders]);
+
+  const notesByFolder = useMemo(() => {
+    const map = new Map<string | null, NoteDoc[]>();
+    notes.forEach((note) => {
+      const key = note.folderId ?? null;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(note);
+    });
+    map.forEach((list) => list.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)));
+    return map;
+  }, [notes]);
+
+  const toggleFolderExpanded = (folderId: string) => {
+    setExpandedFolderIds((prev) =>
+      prev.includes(folderId) ? prev.filter((id) => id !== folderId) : [...prev, folderId]
+    );
   };
 
   const menuItems = [
@@ -54,6 +93,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentView, setViewMode, curr
       id: ViewMode.EXPENSES,
       label: 'Expenses',
       icon: BanknotesIcon,
+    },
+    {
+      id: ViewMode.NOTES,
+      label: 'Notas',
+      icon: DocumentIcon,
     },
   ];
 
@@ -93,6 +137,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentView, setViewMode, curr
         {menuItems.map((item) => {
           const isActive = currentView === item.id;
           const hasSubItems = item.id === ViewMode.LIST && !isCollapsed && isActive;
+          const showNotesTree = item.id === ViewMode.NOTES && !isCollapsed && isActive;
 
           return (
             <div key={item.id}>
@@ -131,6 +176,90 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentView, setViewMode, curr
                             </button>
                         ))}
                     </div>
+                )}
+
+                {showNotesTree && (
+                  <div className="mt-2 ml-4 space-y-2 pl-4 border-l border-slate-800">
+                    <div className="flex items-center justify-between text-xs text-slate-500">
+                      <span>Notas</span>
+                      <button
+                        onClick={() => setNotesTreeExpanded((prev) => !prev)}
+                        className="p-1 rounded hover:bg-slate-800 text-slate-400"
+                        title={notesTreeExpanded ? 'Ocultar' : 'Mostrar'}
+                      >
+                        {notesTreeExpanded ? <ChevronDownIcon className="w-3 h-3" /> : <ChevronRightIcon className="w-3 h-3" />}
+                      </button>
+                    </div>
+                    {notesTreeExpanded && (
+                      <div className="space-y-1">
+                        {(folderChildren.get(null) || []).map((folder) => {
+                          const renderFolder = (node: NoteFolder, depth: number) => {
+                            const childFolders = folderChildren.get(node.id) || [];
+                            const childNotes = notesByFolder.get(node.id) || [];
+                            const hasChildren = childFolders.length + childNotes.length > 0;
+                            const isExpanded = expandedFolderIds.includes(node.id);
+                            return (
+                              <div key={node.id}>
+                                <div className="flex items-center" style={{ paddingLeft: 6 + depth * 10 }}>
+                                  {hasChildren ? (
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        toggleFolderExpanded(node.id);
+                                      }}
+                                      className="p-1 rounded hover:bg-slate-800 text-slate-400"
+                                      title={isExpanded ? 'Ocultar' : 'Mostrar'}
+                                    >
+                                      {isExpanded ? <ChevronDownIcon className="w-3 h-3" /> : <ChevronRightIcon className="w-3 h-3" />}
+                                    </button>
+                                  ) : (
+                                    <span className="w-5" />
+                                  )}
+                                  <button
+                                    onClick={() => setViewMode(ViewMode.NOTES)}
+                                    className="flex-1 flex items-center gap-2 px-2 py-1 rounded-md text-xs text-slate-400 hover:bg-slate-800"
+                                  >
+                                    <FolderIcon className="w-3.5 h-3.5" />
+                                    <span className="truncate">{node.name}</span>
+                                  </button>
+                                </div>
+                                {isExpanded && (
+                                  <div className="mt-1 space-y-1">
+                                    {childFolders.map((child) => renderFolder(child, depth + 1))}
+                                    {childNotes.map((note) => (
+                                      <button
+                                        key={note.id}
+                                        onClick={() => setViewMode(ViewMode.NOTES)}
+                                        className="w-full flex items-center gap-2 px-2 py-1 rounded-md text-[11px] text-slate-400 hover:bg-slate-800"
+                                        style={{ paddingLeft: 18 + (depth + 1) * 10 }}
+                                      >
+                                        <DocumentIcon className="w-3 h-3" />
+                                        <span className="truncate">{note.title || 'Untitled'}</span>
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          };
+                          return renderFolder(folder, 0);
+                        })}
+                        {(folderChildren.get(null) || []).length === 0 && (
+                          <p className="text-[11px] text-slate-600">Sin carpetas.</p>
+                        )}
+                        {(notesByFolder.get(null) || []).map((note) => (
+                          <button
+                            key={note.id}
+                            onClick={() => setViewMode(ViewMode.NOTES)}
+                            className="w-full flex items-center gap-2 px-2 py-1 rounded-md text-[11px] text-slate-400 hover:bg-slate-800"
+                          >
+                            <DocumentIcon className="w-3 h-3" />
+                            <span className="truncate">{note.title || 'Untitled'}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 )}
             </div>
           );

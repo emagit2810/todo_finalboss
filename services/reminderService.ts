@@ -54,8 +54,8 @@ export const sendReminder = async (
     const reminderText = data?.reminder_text || data?.reminderText;
     const whatsappLink = data?.whatsapp_link || data?.whatsappLink;
 
-    // Intenta abrir el link de WhatsApp inmediatamente para disparar el mensaje.
-    const whatsappLinkOpened = tryOpenWhatsAppLink(whatsappLink);
+    // El link de WhatsApp se abre desde la UI segun la opcion seleccionada.
+    const whatsappLinkOpened = false;
 
     return {
       success: true,

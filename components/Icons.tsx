@@ -82,6 +82,20 @@ export const BanknotesIcon = ({ className }: { className?: string }) => (
   </svg>
 );
 
+export const DocumentIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25V7.875a1.875 1.875 0 0 0-1.875-1.875H10.5L6.375 9.75V18a1.875 1.875 0 0 0 1.875 1.875h5.625" />
+    <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 6v3.75H6.75" />
+    <path strokeLinecap="round" strokeLinejoin="round" d="M12.75 15.75h4.5m-4.5-3h4.5" />
+  </svg>
+);
+
+export const FolderIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75A1.5 1.5 0 0 1 5.25 5.25h4.19a1.5 1.5 0 0 1 1.06.44l1.06 1.06H18.75a1.5 1.5 0 0 1 1.5 1.5v7.5a1.5 1.5 0 0 1-1.5 1.5H5.25a1.5 1.5 0 0 1-1.5-1.5V6.75Z" />
+  </svg>
+);
+
 export const ChevronLeftIcon = ({ className }: { className?: string }) => (
   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className}>
     <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" />
