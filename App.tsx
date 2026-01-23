@@ -937,15 +937,6 @@ function App() {
                 </div>
            )}
 
-           {viewMode === ViewMode.NOTES && (
-                <div className="max-w-5xl mx-auto mb-8">
-                    <h2 className="text-3xl font-bold text-white mb-1 bg-gradient-to-r from-emerald-400 to-teal-400 bg-clip-text text-transparent inline-block">
-                        Notas
-                    </h2>
-                    <p className="text-slate-400 text-sm">Documentos y carpetas estilo Notion.</p>
-                </div>
-           )}
-
            {renderContent()}
       </main>
 
@@ -1077,4 +1068,3 @@ function App() {
 }
 
 export default App;
-

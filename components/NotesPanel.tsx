@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { NoteDoc, NoteFolder, Todo, Priority } from '../types';
 import { DocumentIcon, FolderIcon, PlusIcon, TrashIcon, ChevronDownIcon, ChevronRightIcon, ArrowsCollapseIcon, ArrowsExpandIcon, XMarkIcon } from './Icons';
 import jsPDF from 'jspdf';
@@ -66,6 +66,7 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
   const [notesTreeExpanded, setNotesTreeExpanded] = useState(true);
   const [expandedFolderIds, setExpandedFolderIds] = useState<string[]>([]);
   const [isEditorWide, setIsEditorWide] = useState(false);
+  const [isOptionsOpen, setIsOptionsOpen] = useState(false);
 
   const [newFolderName, setNewFolderName] = useState('');
   const [newNoteTitle, setNewNoteTitle] = useState('');
@@ -194,27 +195,56 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
     setTaskQuery('');
   };
 
+  const searchText = searchQuery.trim().toLowerCase();
+  const tagFilters = useMemo(() => normalizeTags(tagQuery), [tagQuery]);
+  const isFilterActive = searchText.length > 0 || tagFilters.length > 0;
+
+  const noteMatches = useCallback((note: NoteDoc) => {
+    const haystack = `${note.title} ${(note.content || '')} ${(note.tags || []).join(' ')}`.toLowerCase();
+    const textMatch = searchText ? haystack.includes(searchText) : false;
+    const noteTags = (note.tags || []).map((t) => t.toLowerCase());
+    const tagMatch = tagFilters.length > 0 ? tagFilters.some((t) => noteTags.includes(t)) : false;
+    if (searchText && tagFilters.length > 0) return textMatch || tagMatch;
+    if (searchText) return textMatch;
+    if (tagFilters.length > 0) return tagMatch;
+    return true;
+  }, [searchText, tagFilters]);
+
+  const folderMatches = useCallback((folder: NoteFolder) => {
+    const name = folder.name.toLowerCase();
+    const textMatch = searchText ? name.includes(searchText) : false;
+    const tagMatch = tagFilters.length > 0 ? tagFilters.some((t) => name.includes(t)) : false;
+    if (searchText && tagFilters.length > 0) return textMatch || tagMatch;
+    if (searchText) return textMatch;
+    if (tagFilters.length > 0) return tagMatch;
+    return true;
+  }, [searchText, tagFilters]);
+
   const filteredNotes = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-    const tagFilters = normalizeTags(tagQuery);
     let list = notes;
-    if (activeFolderId) {
+    if (!isFilterActive && activeFolderId) {
       list = list.filter((n) => n.folderId === activeFolderId);
     }
-    if (query) {
-      list = list.filter((n) => {
-        const text = `${n.title} ${(n.content || '')} ${(n.tags || []).join(' ')}`.toLowerCase();
-        return text.includes(query);
-      });
-    }
-    if (tagFilters.length > 0) {
-      list = list.filter((n) => {
-        const tags = (n.tags || []).map((t) => t.toLowerCase());
-        return tagFilters.every((t) => tags.includes(t));
-      });
+    if (isFilterActive) {
+      list = list.filter(noteMatches);
+      return list.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
     }
     return list.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-  }, [notes, activeFolderId, searchQuery, tagQuery]);
+  }, [notes, activeFolderId, isFilterActive, noteMatches]);
+
+  const filteredTreeNotes = useMemo(() => {
+    if (!isFilterActive) return [];
+    return notes
+      .filter(noteMatches)
+      .sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+  }, [notes, isFilterActive, noteMatches]);
+
+  const filteredTreeFolders = useMemo(() => {
+    if (!isFilterActive) return [];
+    return folders
+      .filter(folderMatches)
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [folders, isFilterActive, folderMatches]);
 
   const activeNote = activeNoteId ? notes.find((n) => n.id === activeNoteId) || null : null;
   const isNoteLocked = !!(activeNote?.locked && !unlockedNoteIds.includes(activeNote.id));
@@ -695,7 +725,11 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
   };
 
   return (
-    <div className={`max-w-5xl mx-auto grid gap-6 ${isEditorWide ? 'grid-cols-1' : 'grid-cols-1 lg:grid-cols-[260px_1fr]'}`}>
+    <div
+      className={`grid gap-6 w-full ${
+        isEditorWide ? 'max-w-none' : 'max-w-5xl mx-auto'
+      } ${isEditorWide ? 'grid-cols-1' : 'grid-cols-1 lg:grid-cols-[260px_1fr]'}`}
+    >
       {!isEditorWide && (
         <aside className="bg-slate-900/40 border border-slate-800 rounded-xl p-4 space-y-4">
         <div>
@@ -726,103 +760,163 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
             </button>
           </div>
           {notesTreeExpanded && (
-            <div className="space-y-1">
-              <button
-                onClick={() => setActiveFolderId(null)}
-                className={`w-full flex items-center gap-2 px-2 py-2 rounded-md text-sm ${!activeFolderId ? 'bg-emerald-500/10 text-emerald-300' : 'text-slate-400 hover:bg-slate-800'}`}
-              >
-                <FolderIcon className="w-4 h-4" />
-                Todas las notas
-              </button>
-              <div className="mt-1 space-y-1">
-                {(folderChildren.get(null) || []).map((folder) => {
-                  const renderFolder = (node: NoteFolder, depth: number) => {
-                    const childFolders = folderChildren.get(node.id) || [];
-                    const childNotes = notesByFolder.get(node.id) || [];
-                    const hasChildren = childFolders.length + childNotes.length > 0;
-                    const isExpanded = expandedFolderIds.includes(node.id);
-                    const isActive = activeFolderId === node.id;
-                    const locked = node.locked && !unlockedFolderIds.includes(node.id);
-                    return (
-                      <div key={node.id}>
-                        <div className="flex items-center" style={{ paddingLeft: 8 + depth * 12 }}>
-                          {hasChildren ? (
+            <>
+              {isFilterActive ? (
+                <div className="space-y-3">
+                  <div>
+                    <p className="text-[11px] uppercase tracking-wider text-slate-500 mb-2">Carpetas</p>
+                    {filteredTreeFolders.length === 0 ? (
+                      <p className="text-xs text-slate-600">Sin carpetas.</p>
+                    ) : (
+                      <div className="space-y-1">
+                        {filteredTreeFolders.map((folder) => {
+                          const locked = folder.locked && !unlockedFolderIds.includes(folder.id);
+                          const isActive = activeFolderId === folder.id;
+                          return (
                             <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                toggleFolderExpanded(node.id);
-                              }}
-                              className="p-1 rounded hover:bg-slate-800 text-slate-400"
-                              title={isExpanded ? 'Ocultar' : 'Mostrar'}
+                              key={folder.id}
+                              onClick={() => setActiveFolderId(folder.id)}
+                              className={`w-full flex items-center gap-2 px-2 py-1 rounded-md text-xs ${
+                                isActive ? 'bg-emerald-500/10 text-emerald-300' : 'text-slate-400 hover:bg-slate-800'
+                              } ${locked ? 'opacity-70' : ''}`}
                             >
-                              {isExpanded ? <ChevronDownIcon className="w-3 h-3" /> : <ChevronRightIcon className="w-3 h-3" />}
+                              <FolderIcon className="w-4 h-4" />
+                              <span className="truncate">{folder.name}</span>
+                              {folder.locked && <span className="ml-auto text-[10px] text-amber-400">LOCK</span>}
                             </button>
-                          ) : (
-                            <span className="w-5" />
-                          )}
-                          <button
-                            onClick={() => setActiveFolderId(node.id)}
-                            className={`flex-1 flex items-center gap-2 px-2 py-1 rounded-md text-sm ${isActive ? 'bg-emerald-500/10 text-emerald-300' : 'text-slate-400 hover:bg-slate-800'} ${locked ? 'opacity-70' : ''}`}
-                          >
-                            <FolderIcon className="w-4 h-4" />
-                            <span className="truncate">{node.name}</span>
-                            {node.locked && <span className="ml-auto text-[10px] text-amber-400">LOCK</span>}
-                          </button>
-                        </div>
-                        {isExpanded && (
-                          <div className="mt-1 space-y-1">
-                            {childFolders.map((child) => renderFolder(child, depth + 1))}
-                            {childNotes.map((note) => {
-                              const isNoteActive = activeNoteId === note.id;
-                              return (
-                                <button
-                                  key={note.id}
-                                  onClick={async () => {
-                                    if (locked) return;
-                                    await persistDraft();
-                                    setActiveFolderId(node.id);
-                                    setActiveNoteId(note.id);
-                                  }}
-                                  className={`w-full flex items-center gap-2 px-2 py-1 rounded-md text-xs ${isNoteActive ? 'bg-indigo-600/10 text-indigo-200' : 'text-slate-400 hover:bg-slate-800'} ${locked ? 'opacity-60 cursor-not-allowed' : ''}`}
-                                  style={{ paddingLeft: 20 + (depth + 1) * 12 }}
-                                  disabled={locked}
-                                >
-                                  <DocumentIcon className="w-3.5 h-3.5" />
-                                  <span className="truncate">{note.title || 'Untitled'}</span>
-                                  {note.locked && <span className="ml-auto text-[10px] text-amber-400">LOCK</span>}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        )}
+                          );
+                        })}
                       </div>
-                    );
-                  };
-                  return renderFolder(folder, 0);
-                })}
-                {(folderChildren.get(null) || []).length === 0 && (
-                  <p className="text-xs text-slate-600">Sin carpetas.</p>
-                )}
-                {(notesByFolder.get(null) || []).map((note) => {
-                  const isNoteActive = activeNoteId === note.id;
-                  return (
-                    <button
-                      key={note.id}
-                      onClick={async () => {
-                        await persistDraft();
-                        setActiveFolderId(null);
-                        setActiveNoteId(note.id);
-                      }}
-                      className={`w-full flex items-center gap-2 px-2 py-1 rounded-md text-xs ${isNoteActive ? 'bg-indigo-600/10 text-indigo-200' : 'text-slate-400 hover:bg-slate-800'}`}
-                    >
-                      <DocumentIcon className="w-3.5 h-3.5" />
-                      <span className="truncate">{note.title || 'Untitled'}</span>
-                      {note.locked && <span className="ml-auto text-[10px] text-amber-400">LOCK</span>}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
+                    )}
+                  </div>
+                  <div>
+                    <p className="text-[11px] uppercase tracking-wider text-slate-500 mb-2">Documentos</p>
+                    {filteredTreeNotes.length === 0 ? (
+                      <p className="text-xs text-slate-600">Sin documentos.</p>
+                    ) : (
+                      <div className="space-y-1">
+                        {filteredTreeNotes.map((note) => {
+                          const isNoteActive = activeNoteId === note.id;
+                          const folderLocked = note.folderId
+                            ? !!(folderMap.get(note.folderId)?.locked && !unlockedFolderIds.includes(note.folderId))
+                            : false;
+                          return (
+                            <button
+                              key={note.id}
+                              onClick={async () => {
+                                if (folderLocked) return;
+                                await persistDraft();
+                                setActiveFolderId(note.folderId ?? null);
+                                setActiveNoteId(note.id);
+                              }}
+                              className={`w-full flex items-center gap-2 px-2 py-1 rounded-md text-xs ${
+                                isNoteActive ? 'bg-indigo-600/10 text-indigo-200' : 'text-slate-400 hover:bg-slate-800'
+                              } ${folderLocked ? 'opacity-60 cursor-not-allowed' : ''}`}
+                              disabled={folderLocked}
+                            >
+                              <DocumentIcon className="w-3.5 h-3.5" />
+                              <span className="truncate">{note.title || 'Untitled'}</span>
+                              {note.locked && <span className="ml-auto text-[10px] text-amber-400">LOCK</span>}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  <div className="mt-1 space-y-1">
+                    {(folderChildren.get(null) || []).map((folder) => {
+                      const renderFolder = (node: NoteFolder, depth: number) => {
+                        const childFolders = folderChildren.get(node.id) || [];
+                        const childNotes = notesByFolder.get(node.id) || [];
+                        const hasChildren = childFolders.length + childNotes.length > 0;
+                        const isExpanded = expandedFolderIds.includes(node.id);
+                        const isActive = activeFolderId === node.id;
+                        const locked = node.locked && !unlockedFolderIds.includes(node.id);
+                        return (
+                          <div key={node.id}>
+                            <div className="flex items-center" style={{ paddingLeft: 8 + depth * 12 }}>
+                              {hasChildren ? (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    toggleFolderExpanded(node.id);
+                                  }}
+                                  className="p-1 rounded hover:bg-slate-800 text-slate-400"
+                                  title={isExpanded ? 'Ocultar' : 'Mostrar'}
+                                >
+                                  {isExpanded ? <ChevronDownIcon className="w-3 h-3" /> : <ChevronRightIcon className="w-3 h-3" />}
+                                </button>
+                              ) : (
+                                <span className="w-5" />
+                              )}
+                              <button
+                                onClick={() => setActiveFolderId(node.id)}
+                                className={`flex-1 flex items-center gap-2 px-2 py-1 rounded-md text-sm ${isActive ? 'bg-emerald-500/10 text-emerald-300' : 'text-slate-400 hover:bg-slate-800'} ${locked ? 'opacity-70' : ''}`}
+                              >
+                                <FolderIcon className="w-4 h-4" />
+                                <span className="truncate">{node.name}</span>
+                                {node.locked && <span className="ml-auto text-[10px] text-amber-400">LOCK</span>}
+                              </button>
+                            </div>
+                            {isExpanded && (
+                              <div className="mt-1 space-y-1">
+                                {childFolders.map((child) => renderFolder(child, depth + 1))}
+                                {childNotes.map((note) => {
+                                  const isNoteActive = activeNoteId === note.id;
+                                  return (
+                                    <button
+                                      key={note.id}
+                                      onClick={async () => {
+                                        if (locked) return;
+                                        await persistDraft();
+                                        setActiveFolderId(node.id);
+                                        setActiveNoteId(note.id);
+                                      }}
+                                      className={`w-full flex items-center gap-2 px-2 py-1 rounded-md text-xs ${isNoteActive ? 'bg-indigo-600/10 text-indigo-200' : 'text-slate-400 hover:bg-slate-800'} ${locked ? 'opacity-60 cursor-not-allowed' : ''}`}
+                                      style={{ paddingLeft: 20 + (depth + 1) * 12 }}
+                                      disabled={locked}
+                                    >
+                                      <DocumentIcon className="w-3.5 h-3.5" />
+                                      <span className="truncate">{note.title || 'Untitled'}</span>
+                                      {note.locked && <span className="ml-auto text-[10px] text-amber-400">LOCK</span>}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      };
+                      return renderFolder(folder, 0);
+                    })}
+                    {(folderChildren.get(null) || []).length === 0 && (
+                      <p className="text-xs text-slate-600">Sin carpetas.</p>
+                    )}
+                    {(notesByFolder.get(null) || []).map((note) => {
+                      const isNoteActive = activeNoteId === note.id;
+                      return (
+                        <button
+                          key={note.id}
+                          onClick={async () => {
+                            await persistDraft();
+                            setActiveFolderId(null);
+                            setActiveNoteId(note.id);
+                          }}
+                          className={`w-full flex items-center gap-2 px-2 py-1 rounded-md text-xs ${isNoteActive ? 'bg-indigo-600/10 text-indigo-200' : 'text-slate-400 hover:bg-slate-800'}`}
+                        >
+                          <DocumentIcon className="w-3.5 h-3.5" />
+                          <span className="truncate">{note.title || 'Untitled'}</span>
+                          {note.locked && <span className="ml-auto text-[10px] text-amber-400">LOCK</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </div>
 
@@ -935,7 +1029,11 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
         </aside>
       )}
 
-      <section className="bg-slate-900/40 border border-slate-800 rounded-xl p-5 min-h-[60vh] flex flex-col">
+      <section
+        className={`bg-slate-900/40 border border-slate-800 rounded-xl p-5 flex flex-col ${
+          isEditorWide ? 'min-h-[80vh]' : 'min-h-[60vh]'
+        }`}
+      >
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2 text-sm text-slate-400">
             <DocumentIcon className="w-4 h-4" />
@@ -1000,6 +1098,14 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
                       title="Vincular tarea"
                     >
                       <PlusIcon className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => void persistDraft()}
+                      disabled={!activeNote || isNoteLocked}
+                      className="px-3 py-2 rounded bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-200 border border-emerald-500/30 text-xs disabled:opacity-50"
+                      title="Guardar"
+                    >
+                      Guardar
                     </button>
                     <button
                       onClick={handleDeleteCurrentNote}
@@ -1104,98 +1210,111 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
                     value={draftContent}
                     onChange={(e) => setDraftContent(e.target.value)}
                     placeholder={isNoteLocked ? 'Documento bloqueado' : 'Escribe aqui...'}
-                    className="flex-1 min-h-[240px] bg-slate-950 border border-slate-800 rounded p-3 text-sm text-slate-100 focus:outline-none focus:border-indigo-500 resize-none"
+                    className={`flex-1 ${isEditorWide ? 'min-h-[70vh]' : 'min-h-[240px]'} bg-slate-950 border border-slate-800 rounded p-3 text-sm text-slate-100 focus:outline-none focus:border-indigo-500 resize-none`}
                     disabled={isNoteLocked}
                   />
                   <div className="mt-3">
-                    <label className="text-xs uppercase tracking-wider text-slate-500">Tags</label>
-                    <input
-                      value={draftTags}
-                      onChange={(e) => setDraftTags(e.target.value)}
-                      placeholder="idea, prompt, privado"
-                      className="mt-1 w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs focus:outline-none focus:border-indigo-500"
-                      disabled={isNoteLocked}
-                    />
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {PRESET_TAGS.map((tag) => {
-                        const active = draftTagList.includes(tag.toLowerCase());
-                        return (
-                          <button
-                            key={tag}
-                            onClick={() => togglePresetTag(tag)}
-                            disabled={isNoteLocked}
-                            className={`text-[10px] px-2 py-1 rounded-full border transition-colors ${
-                              active
-                                ? 'bg-emerald-600/20 border-emerald-400 text-emerald-200'
-                                : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200'
-                            }`}
-                          >
-                            {tag}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  <div className="mt-4 border border-slate-800 rounded-lg p-3 space-y-2">
-                    <p className="text-xs uppercase tracking-wider text-slate-500">Seguridad documento</p>
                     <button
-                      onClick={handleExportToPDF}
-                      disabled={!activeNote || isNoteLocked}
-                      className="w-full bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs py-1 rounded disabled:opacity-50"
+                      onClick={() => setIsOptionsOpen((prev) => !prev)}
+                      className="flex items-center gap-2 text-xs uppercase tracking-wider text-slate-400 hover:text-slate-200"
                     >
-                      Exportar a PDF
+                      Opciones
+                      {isOptionsOpen ? <ChevronDownIcon className="w-4 h-4" /> : <ChevronRightIcon className="w-4 h-4" />}
                     </button>
-                    {activeNote.locked ? (
-                      <>
-                        <input
-                          type="password"
-                          value={noteUnlockPassword}
-                          onChange={(e) => setNoteUnlockPassword(e.target.value)}
-                          placeholder="Contrasena"
-                          autoComplete="current-password"
-                          className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs focus:outline-none focus:border-indigo-500"
-                        />
-                        <div className="flex gap-2">
-                          <button
-                            onClick={handleUnlockNote}
-                            className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-xs py-1 rounded"
-                          >
-                            Desbloquear
-                          </button>
-                          <button
-                            onClick={handleRemoveNoteLock}
-                            className="flex-1 bg-rose-600 hover:bg-rose-500 text-white text-xs py-1 rounded"
-                          >
-                            Quitar lock
-                          </button>
+                    {isOptionsOpen && (
+                      <div className="mt-3 space-y-4">
+                        <div>
+                          <label className="text-xs uppercase tracking-wider text-slate-500">Tags</label>
+                          <input
+                            value={draftTags}
+                            onChange={(e) => setDraftTags(e.target.value)}
+                            placeholder="idea, prompt, privado"
+                            className="mt-1 w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs focus:outline-none focus:border-indigo-500"
+                            disabled={isNoteLocked}
+                          />
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {PRESET_TAGS.map((tag) => {
+                              const active = draftTagList.includes(tag.toLowerCase());
+                              return (
+                                <button
+                                  key={tag}
+                                  onClick={() => togglePresetTag(tag)}
+                                  disabled={isNoteLocked}
+                                  className={`text-[10px] px-2 py-1 rounded-full border transition-colors ${
+                                    active
+                                      ? 'bg-emerald-600/20 border-emerald-400 text-emerald-200'
+                                      : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200'
+                                  }`}
+                                >
+                                  {tag}
+                                </button>
+                              );
+                            })}
+                          </div>
                         </div>
-                      </>
-                    ) : (
-                      <>
-                        <input
-                          type="password"
-                          value={noteLockPassword}
-                          onChange={(e) => setNoteLockPassword(e.target.value)}
-                          placeholder="Contrasena"
-                          autoComplete="new-password"
-                          className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs focus:outline-none focus:border-indigo-500"
-                        />
-                        <input
-                          type="password"
-                          value={noteLockConfirm}
-                          onChange={(e) => setNoteLockConfirm(e.target.value)}
-                          placeholder="Confirmar"
-                          autoComplete="new-password"
-                          className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs focus:outline-none focus:border-indigo-500"
-                        />
-                        <button
-                          onClick={handleLockNote}
-                          className="w-full bg-indigo-600 hover:bg-indigo-500 text-white text-xs py-1 rounded"
-                        >
-                          Bloquear documento
-                        </button>
-                      </>
+
+                        <div className="border border-slate-800 rounded-lg p-3 space-y-2">
+                          <p className="text-xs uppercase tracking-wider text-slate-500">Seguridad documento</p>
+                          <button
+                            onClick={handleExportToPDF}
+                            disabled={!activeNote || isNoteLocked}
+                            className="w-full bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs py-1 rounded disabled:opacity-50"
+                          >
+                            Exportar a PDF
+                          </button>
+                          {activeNote.locked ? (
+                            <>
+                              <input
+                                type="password"
+                                value={noteUnlockPassword}
+                                onChange={(e) => setNoteUnlockPassword(e.target.value)}
+                                placeholder="Contrasena"
+                                autoComplete="current-password"
+                                className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs focus:outline-none focus:border-indigo-500"
+                              />
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={handleUnlockNote}
+                                  className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-xs py-1 rounded"
+                                >
+                                  Desbloquear
+                                </button>
+                                <button
+                                  onClick={handleRemoveNoteLock}
+                                  className="flex-1 bg-rose-600 hover:bg-rose-500 text-white text-xs py-1 rounded"
+                                >
+                                  Quitar lock
+                                </button>
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <input
+                                type="password"
+                                value={noteLockPassword}
+                                onChange={(e) => setNoteLockPassword(e.target.value)}
+                                placeholder="Contrasena"
+                                autoComplete="new-password"
+                                className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs focus:outline-none focus:border-indigo-500"
+                              />
+                              <input
+                                type="password"
+                                value={noteLockConfirm}
+                                onChange={(e) => setNoteLockConfirm(e.target.value)}
+                                placeholder="Confirmar"
+                                autoComplete="new-password"
+                                className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs focus:outline-none focus:border-indigo-500"
+                              />
+                              <button
+                                onClick={handleLockNote}
+                                className="w-full bg-indigo-600 hover:bg-indigo-500 text-white text-xs py-1 rounded"
+                              >
+                                Bloquear documento
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
                     )}
                   </div>
                 </>
