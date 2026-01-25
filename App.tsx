@@ -985,6 +985,18 @@ function App() {
     }).length;
   }, [notifications, nowTs]);
 
+  useEffect(() => {
+    if (!notificationsReady) return;
+    const todayStart = getDayStartTs(nowTs);
+    const toDelete = notifications.filter(item => item.read && getDayStartTs(item.scheduledAt) < todayStart);
+    if (toDelete.length === 0) return;
+    const toDeleteIds = new Set(toDelete.map(item => item.id));
+    setNotifications(prev => prev.filter(item => !toDeleteIds.has(item.id)));
+    toDelete.forEach(item => {
+      db.deleteItem('notifications', item.id);
+    });
+  }, [notifications, nowTs, notificationsReady]);
+
   return (
     <div className="flex h-screen bg-slate-950 text-slate-100 font-sans selection:bg-primary-500/30 overflow-hidden relative">
       {/* Toast Notification Layer */}
