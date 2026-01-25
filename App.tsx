@@ -973,7 +973,7 @@ function App() {
         if (notificationFilter === 'tomorrow') {
           return offset === 1;
         }
-        return offset >= 1 && offset <= 7;
+        return offset >= 0 && offset <= 6;
       })
       .sort((a, b) => a.scheduledAt - b.scheduledAt);
   }, [notifications, notificationFilter, nowTs]);
