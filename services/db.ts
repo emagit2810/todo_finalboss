@@ -1,5 +1,5 @@
 import { openDB, DBSchema, IDBPDatabase } from 'idb';
-import { Todo, Medicine, Expense, NoteDoc, NoteFolder } from '../types';
+import { Todo, Medicine, Expense, NoteDoc, NoteFolder, AppNotification } from '../types';
 
 interface TaskMasterDB extends DBSchema {
   todos: {
@@ -26,6 +26,10 @@ interface TaskMasterDB extends DBSchema {
     key: string;
     value: NoteDoc;
   };
+  notifications: {
+    key: string;
+    value: AppNotification;
+  };
   ai_planner_results: {
     key: string;
     value: { id: string; query: string; resultText: string; timestamp: number };
@@ -33,7 +37,7 @@ interface TaskMasterDB extends DBSchema {
 }
 
 const DB_NAME = 'gemini-task-master';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 type StoreName = keyof TaskMasterDB;
 type StoreValue<K extends StoreName> = TaskMasterDB[K]['value'];
@@ -136,6 +140,9 @@ export const initDB = () => {
         }
         if (!db.objectStoreNames.contains('notes')) {
           db.createObjectStore('notes', { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains('notifications')) {
+          db.createObjectStore('notifications', { keyPath: 'id' });
         }
         if (!db.objectStoreNames.contains('ai_planner_results')) {
           db.createObjectStore('ai_planner_results', { keyPath: 'id' });

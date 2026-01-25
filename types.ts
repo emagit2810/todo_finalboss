@@ -68,6 +68,18 @@ export interface NoteDoc {
   lockIterations?: number;
 }
 
+export type NotificationSource = 'todo' | 'reminder';
+
+export interface AppNotification {
+  id: string;
+  message: string;
+  source: NotificationSource;
+  scheduledAt: number;
+  createdAt: number;
+  read: boolean;
+  todoId?: string;
+}
+
 export enum ViewMode {
   LIST = 'LIST',
   CALENDAR = 'CALENDAR',

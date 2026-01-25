@@ -1,6 +1,6 @@
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Todo, ViewMode, Medicine, Expense, Priority, Subtask, NoteDoc, NoteFolder } from './types';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { Todo, ViewMode, Medicine, Expense, Priority, Subtask, NoteDoc, NoteFolder, AppNotification } from './types';
 import { TodoItem } from './components/TodoItem';
 import { brainstormTasks } from './services/geminiService';
 import { PlusIcon, BrainIcon, ArrowsExpandIcon, ArrowsCollapseIcon, FlagIcon, BellIcon, ClockIcon, DocumentIcon, XMarkIcon } from './components/Icons';
@@ -14,18 +14,22 @@ import { sendReminder, tryOpenWhatsAppLink } from './services/reminderService';
 import { Toast } from './components/Toast';
 import { VoiceDictation } from './components/VoiceDictation';
 
-type LocalNotificationItem = {
-  id: string;
-  message: string;
-  createdAt: number;
-  read: boolean;
-};
+type NotificationFilter = 'today' | 'tomorrow' | 'week';
 
 type ReminderOptions = {
   sendToApi: boolean;
   openWhatsApp: boolean;
   createTaskFromResponse: boolean;
   localNotification: boolean;
+};
+
+const MS_MINUTE = 60 * 1000;
+const MS_HOUR = 60 * 60 * 1000;
+const MS_DAY = 24 * 60 * 60 * 1000;
+
+const getDayStartTs = (timestamp: number) => {
+  const date = new Date(timestamp);
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
 };
 
 function App() {
@@ -63,7 +67,9 @@ function App() {
   const [reminderText, setReminderText] = useState('');
   const [reminderEdited, setReminderEdited] = useState(false);
   const [reminderLoading, setReminderLoading] = useState(false);
-  const [reminderDelayMinutes, setReminderDelayMinutes] = useState(5);
+  const [localReminderMode, setLocalReminderMode] = useState<'hours' | 'days' | 'minute'>('hours');
+  const [localReminderHours, setLocalReminderHours] = useState(3);
+  const [localReminderDays, setLocalReminderDays] = useState(1);
   const [reminderOptions, setReminderOptions] = useState<ReminderOptions>({
     sendToApi: true,
     openWhatsApp: false,
@@ -72,8 +78,10 @@ function App() {
   });
   const [notification, setNotification] = useState<{ message: string, type: 'success' | 'error', sticky?: boolean } | null>(null);
   const [notificationCenterOpen, setNotificationCenterOpen] = useState(false);
-  const [notificationInbox, setNotificationInbox] = useState<LocalNotificationItem[]>([]);
-  const reminderTimeoutsRef = useRef<number[]>([]);
+  const [notificationFilter, setNotificationFilter] = useState<NotificationFilter>('today');
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [notificationsReady, setNotificationsReady] = useState(false);
+  const [nowTs, setNowTs] = useState(Date.now());
 
   // --- Initialization (Load from IndexedDB) ---
   useEffect(() => {
@@ -85,12 +93,7 @@ function App() {
 
             // Load Medicines
             const loadedMedicines = await db.getAll('medicines');
-            const MS_DAY = 24 * 60 * 60 * 1000;
-            const getTodayStart = () => {
-                const now = new Date();
-                return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-            };
-            const todayStart = getTodayStart();
+            const todayStart = getDayStartTs(Date.now());
             const normalizedMedicines: Medicine[] = [];
             const medicinesToUpdate: Medicine[] = [];
 
@@ -166,8 +169,12 @@ function App() {
             const sortedNotes = loadedNotes.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
             setNotes(sortedNotes);
 
+            const loadedNotifications = await db.getAll('notifications');
+            setNotifications(loadedNotifications);
         } catch (error) {
             console.error("Failed to load data from DB", error);
+        } finally {
+            setNotificationsReady(true);
         }
     };
     loadData();
@@ -178,16 +185,17 @@ function App() {
     if (!text.trim()) return;
     
     const now = Date.now();
+    const resolvedDueDate = dateOverride ?? (inputDueDate ? (() => {
+      const [y, m, d] = inputDueDate.split('-').map(Number);
+      return new Date(y, m - 1, d, 12, 0, 0).getTime();
+    })() : undefined);
     const newTodo: Todo = {
         id: crypto.randomUUID(),
         text: text.trim(),
         completed: false,
         createdAt: now,
         priority,
-        dueDate: inputDueDate ? (() => {
-            const [y, m, d] = inputDueDate.split('-').map(Number);
-            return new Date(y, m - 1, d, 12, 0, 0).getTime();
-        })() : undefined,
+        dueDate: resolvedDueDate,
         linkedNotes: linkedNoteId ? [linkedNoteId] : undefined,
     };
 
@@ -262,33 +270,117 @@ function App() {
   const toggleNotificationCenter = () => {
     setNotificationCenterOpen((prev) => {
       const next = !prev;
-      if (!prev && next) {
-        setNotificationInbox(items => items.map(item => ({ ...item, read: true })));
+      if (next) {
+        setNotificationFilter('today');
       }
       return next;
     });
   };
 
-  const scheduleLocalNotification = (message: string, delayMinutes: number) => {
-    const safeDelay = Math.max(0, Math.round(delayMinutes));
-    const delayMs = safeDelay * 60 * 1000;
-    const timeoutId = window.setTimeout(() => {
-      setNotificationInbox(prev => [
-        {
-          id: crypto.randomUUID(),
-          message,
-          createdAt: Date.now(),
-          read: false
-        },
-        ...prev
-      ]);
-    }, delayMs);
-    reminderTimeoutsRef.current.push(timeoutId);
+  const createLocalNotification = useCallback(async (message: string, scheduledAt: number) => {
+    const newItem: AppNotification = {
+      id: crypto.randomUUID(),
+      message,
+      source: 'reminder',
+      scheduledAt,
+      createdAt: Date.now(),
+      read: false,
+    };
+    setNotifications(prev => [newItem, ...prev]);
+    await db.putItem('notifications', newItem);
+  }, []);
+
+  const toggleNotificationRead = (item: AppNotification) => {
+    const nextRead = !item.read;
+    setNotifications(prev => prev.map(n => n.id === item.id ? { ...n, read: nextRead } : n));
+    db.putItem('notifications', { ...item, read: nextRead });
   };
 
   const updateReminderOption = (key: keyof ReminderOptions, checked: boolean) => {
     setReminderOptions(prev => ({ ...prev, [key]: checked }));
   };
+
+  useEffect(() => {
+    if (!notificationsReady) return;
+    let cancelled = false;
+
+    const syncTodoNotifications = async () => {
+      const existingMap = new Map(notifications.map(n => [n.id, n]));
+      const nextNotifications = [...notifications];
+      const keepIds = new Set<string>();
+      const updates: AppNotification[] = [];
+      const deletions: string[] = [];
+
+      const upsertLocal = (item: AppNotification) => {
+        const idx = nextNotifications.findIndex(n => n.id === item.id);
+        if (idx === -1) {
+          nextNotifications.unshift(item);
+        } else {
+          nextNotifications[idx] = item;
+        }
+      };
+
+      todos.forEach(todo => {
+        if (!todo.dueDate || todo.completed) return;
+        const id = `todo:${todo.id}`;
+        keepIds.add(id);
+        const scheduledAt = getDayStartTs(todo.dueDate);
+        const existing = existingMap.get(id);
+        const base: AppNotification = {
+          id,
+          message: todo.text,
+          source: 'todo',
+          scheduledAt,
+          createdAt: existing?.createdAt ?? todo.createdAt ?? Date.now(),
+          read: existing?.read ?? false,
+          todoId: todo.id,
+        };
+
+        if (!existing) {
+          upsertLocal(base);
+          updates.push(base);
+          return;
+        }
+
+        const needsUpdate =
+          existing.message !== base.message ||
+          existing.scheduledAt !== base.scheduledAt ||
+          existing.source !== base.source ||
+          existing.todoId !== base.todoId;
+        if (needsUpdate) {
+          const nextItem = { ...existing, ...base, read: existing.read };
+          upsertLocal(nextItem);
+          updates.push(nextItem);
+        }
+      });
+
+      notifications.forEach(item => {
+        if (item.source !== 'todo') return;
+        if (!keepIds.has(item.id)) {
+          deletions.push(item.id);
+        }
+      });
+
+      if (updates.length > 0 || deletions.length > 0) {
+        const filtered = nextNotifications.filter(n => !deletions.includes(n.id));
+        if (!cancelled) {
+          setNotifications(filtered);
+        }
+      }
+
+      for (const item of updates) {
+        await db.putItem('notifications', item);
+      }
+      for (const id of deletions) {
+        await db.deleteItem('notifications', id);
+      }
+    };
+
+    syncTodoNotifications();
+    return () => {
+      cancelled = true;
+    };
+  }, [notifications, notificationsReady, todos]);
 
   useEffect(() => {
     if (!isReminderPanelOpen) return;
@@ -299,9 +391,14 @@ function App() {
   }, [inputValue, isReminderPanelOpen, reminderEdited, reminderText]);
 
   useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setNowTs(Date.now());
+    }, 10000);
+    const handleFocus = () => setNowTs(Date.now());
+    window.addEventListener('focus', handleFocus);
     return () => {
-      reminderTimeoutsRef.current.forEach(id => clearTimeout(id));
-      reminderTimeoutsRef.current = [];
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleFocus);
     };
   }, []);
 
@@ -456,7 +553,16 @@ function App() {
       }
 
       if (reminderOptions.localNotification) {
-        scheduleLocalNotification(textToSend, reminderDelayMinutes);
+        const now = Date.now();
+        let scheduledAt = now + MS_MINUTE;
+        if (localReminderMode === 'hours') {
+          const hours = Math.max(1, Math.round(localReminderHours || 1));
+          scheduledAt = now + hours * MS_HOUR;
+        } else if (localReminderMode === 'days') {
+          const days = Math.max(1, Math.round(localReminderDays || 1));
+          scheduledAt = now + days * MS_DAY;
+        }
+        await createLocalNotification(textToSend, scheduledAt);
       }
 
       setReminderText('');
@@ -849,7 +955,35 @@ function App() {
     );
   };
 
-  const unreadCount = notificationInbox.filter(n => !n.read).length;
+  const todayStartTs = getDayStartTs(nowTs);
+  const getDayOffset = (timestamp: number) => {
+    return Math.round((getDayStartTs(timestamp) - todayStartTs) / MS_DAY);
+  };
+
+  const formatSchedule = (timestamp: number) =>
+    new Date(timestamp).toLocaleString('es-CO', { dateStyle: 'medium', timeStyle: 'short' });
+
+  const filteredNotifications = useMemo(() => {
+    return notifications
+      .filter(item => {
+        const offset = getDayOffset(item.scheduledAt);
+        if (notificationFilter === 'today') {
+          return offset === 0 && item.scheduledAt <= nowTs;
+        }
+        if (notificationFilter === 'tomorrow') {
+          return offset === 1;
+        }
+        return offset >= 1 && offset <= 7;
+      })
+      .sort((a, b) => a.scheduledAt - b.scheduledAt);
+  }, [notifications, notificationFilter, nowTs]);
+
+  const unreadCount = useMemo(() => {
+    return notifications.filter(item => {
+      const offset = getDayOffset(item.scheduledAt);
+      return offset === 0 && item.scheduledAt <= nowTs && !item.read;
+    }).length;
+  }, [notifications, nowTs]);
 
   return (
     <div className="flex h-screen bg-slate-950 text-slate-100 font-sans selection:bg-primary-500/30 overflow-hidden relative">
@@ -879,7 +1013,7 @@ function App() {
         </button>
 
         {notificationCenterOpen && (
-          <div className="mt-2 w-72 max-h-80 overflow-y-auto rounded-xl border border-slate-800 bg-slate-900/95 shadow-2xl p-3">
+          <div className="mt-2 w-80 max-h-96 overflow-y-auto rounded-xl border border-slate-800 bg-slate-900/95 shadow-2xl p-3">
             <div className="flex items-center justify-between mb-2">
               <p className="text-xs uppercase tracking-wider text-slate-400">Notificaciones</p>
               <button
@@ -889,15 +1023,53 @@ function App() {
                 Cerrar
               </button>
             </div>
-            {notificationInbox.length === 0 && (
-              <p className="text-sm text-slate-500">Sin notificaciones.</p>
+
+            <div className="flex items-center gap-2 mb-3">
+              {([
+                { id: 'today', label: 'Hoy' },
+                { id: 'tomorrow', label: 'Manana' },
+                { id: 'week', label: '7 dias' },
+              ] as Array<{ id: NotificationFilter; label: string }>).map((tab) => (
+                <button
+                  key={tab.id}
+                  onClick={() => setNotificationFilter(tab.id)}
+                  className={`px-2 py-1 rounded-full text-[11px] border transition-colors ${
+                    notificationFilter === tab.id
+                      ? 'bg-indigo-500/20 text-indigo-200 border-indigo-500/40'
+                      : 'border-slate-700 text-slate-400 hover:text-slate-200 hover:border-slate-500'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            {filteredNotifications.length === 0 && (
+              <p className="text-sm text-slate-500">Sin notificaciones para esta vista.</p>
             )}
-            {notificationInbox.map(item => (
-              <div key={item.id} className="border border-slate-800 rounded-lg p-2 mb-2 last:mb-0 bg-slate-950/40">
-                <p className="text-sm text-slate-200">{item.message}</p>
-                <p className="text-[10px] text-slate-500 mt-1">
-                  {new Date(item.createdAt).toLocaleTimeString()}
-                </p>
+
+            {filteredNotifications.map(item => (
+              <div
+                key={item.id}
+                className={`border border-slate-800 rounded-lg p-2 mb-2 last:mb-0 bg-slate-950/40 ${
+                  item.read ? 'opacity-60' : ''
+                }`}
+              >
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={item.read}
+                    onChange={() => toggleNotificationRead(item)}
+                    className="mt-1"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-slate-200 break-words">{item.message}</p>
+                    <div className="flex items-center gap-2 text-[10px] text-slate-500 mt-1">
+                      <span className="uppercase tracking-wide">{item.source === 'todo' ? 'Tarea' : 'Recordatorio'}</span>
+                      <span>{formatSchedule(item.scheduledAt)}</span>
+                    </div>
+                  </div>
+                </label>
               </div>
             ))}
           </div>
@@ -1026,19 +1198,55 @@ function App() {
                   className="mt-1"
                 />
                 <div className="flex-1">
-                  <p className="text-sm text-slate-200">Notificacion local programada</p>
+                  <p className="text-sm text-slate-200">Recordatorio app</p>
                   <p className="text-xs text-slate-500">Aparece en el centro de notificaciones de la web.</p>
                   {reminderOptions.localNotification && (
-                    <div className="mt-2 flex items-center gap-2">
-                      <span className="text-xs text-slate-400">Minutos:</span>
-                      <input
-                        type="number"
-                        min={1}
-                        max={1440}
-                        value={reminderDelayMinutes}
-                        onChange={(e) => setReminderDelayMinutes(Number(e.target.value || 1))}
-                        className="w-20 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
-                      />
+                    <div className="mt-3 space-y-2 text-xs text-slate-300">
+                      <label className="flex items-center gap-2">
+                        <input
+                          type="radio"
+                          name="local-reminder-mode"
+                          checked={localReminderMode === 'hours'}
+                          onChange={() => setLocalReminderMode('hours')}
+                        />
+                        <span>Dentro de</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={168}
+                          value={localReminderHours}
+                          onChange={(e) => setLocalReminderHours(Number(e.target.value || 1))}
+                          className="w-20 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
+                        />
+                        <span>horas</span>
+                      </label>
+                      <label className="flex items-center gap-2">
+                        <input
+                          type="radio"
+                          name="local-reminder-mode"
+                          checked={localReminderMode === 'days'}
+                          onChange={() => setLocalReminderMode('days')}
+                        />
+                        <span>Dentro de</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={30}
+                          value={localReminderDays}
+                          onChange={(e) => setLocalReminderDays(Number(e.target.value || 1))}
+                          className="w-20 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
+                        />
+                        <span>dias</span>
+                      </label>
+                      <label className="flex items-center gap-2">
+                        <input
+                          type="radio"
+                          name="local-reminder-mode"
+                          checked={localReminderMode === 'minute'}
+                          onChange={() => setLocalReminderMode('minute')}
+                        />
+                        <span>En 1 minuto (test)</span>
+                      </label>
                     </div>
                   )}
                 </div>
