@@ -13,6 +13,7 @@ import * as db from './services/db';
 import { sendReminder, tryOpenWhatsAppLink } from './services/reminderService';
 import { Toast } from './components/Toast';
 import { VoiceDictation } from './components/VoiceDictation';
+import { buildMedicineAlerts } from './utils/medicineAlerts';
 
 type NotificationFilter = 'today' | 'tomorrow' | 'week';
 
@@ -26,10 +27,35 @@ type ReminderOptions = {
 const MS_MINUTE = 60 * 1000;
 const MS_HOUR = 60 * 60 * 1000;
 const MS_DAY = 24 * 60 * 60 * 1000;
+const HIGH_EXPENSE_THRESHOLD = 50000;
+const NOTIFICATION_WINDOW_DAYS = 6;
 
 const getDayStartTs = (timestamp: number) => {
   const date = new Date(timestamp);
   return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+};
+
+const isExpenseDueOnDay = (expense: Expense, dayStartTs: number) => {
+  const anchorDayStart = getDayStartTs(expense.date);
+  if (dayStartTs < anchorDayStart) return false;
+
+  if (expense.frequency === 'weekly') {
+    const diffDays = Math.round((dayStartTs - anchorDayStart) / MS_DAY);
+    return diffDays % 7 === 0;
+  }
+
+  const anchorDate = new Date(anchorDayStart);
+  const targetDate = new Date(dayStartTs);
+  const lastDayOfMonth = new Date(targetDate.getFullYear(), targetDate.getMonth() + 1, 0).getDate();
+  const expectedDay = Math.min(anchorDate.getDate(), lastDayOfMonth);
+  return targetDate.getDate() === expectedDay;
+};
+
+const getNotificationSourceLabel = (source: AppNotification['source']) => {
+  if (source === 'todo') return 'Tarea';
+  if (source === 'reminder') return 'Recordatorio';
+  if (source === 'medicine') return 'Medicina';
+  return 'Gasto';
 };
 
 function App() {
@@ -82,6 +108,7 @@ function App() {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [notificationsReady, setNotificationsReady] = useState(false);
   const [nowTs, setNowTs] = useState(Date.now());
+  const notificationWindowStartTs = useMemo(() => getDayStartTs(nowTs), [nowTs]);
 
   // --- Initialization (Load from IndexedDB) ---
   useEffect(() => {
@@ -304,12 +331,16 @@ function App() {
     if (!notificationsReady) return;
     let cancelled = false;
 
-    const syncTodoNotifications = async () => {
+    const syncGeneratedNotifications = async () => {
       const existingMap = new Map(notifications.map(n => [n.id, n]));
       const nextNotifications = [...notifications];
       const keepIds = new Set<string>();
       const updates: AppNotification[] = [];
       const deletions: string[] = [];
+      const windowDayStarts = Array.from(
+        { length: NOTIFICATION_WINDOW_DAYS + 1 },
+        (_, offset) => notificationWindowStartTs + offset * MS_DAY
+      );
 
       const upsertLocal = (item: AppNotification) => {
         const idx = nextNotifications.findIndex(n => n.id === item.id);
@@ -320,21 +351,9 @@ function App() {
         }
       };
 
-      todos.forEach(todo => {
-        if (!todo.dueDate || todo.completed) return;
-        const id = `todo:${todo.id}`;
-        keepIds.add(id);
-        const scheduledAt = getDayStartTs(todo.dueDate);
-        const existing = existingMap.get(id);
-        const base: AppNotification = {
-          id,
-          message: todo.text,
-          source: 'todo',
-          scheduledAt,
-          createdAt: existing?.createdAt ?? todo.createdAt ?? Date.now(),
-          read: existing?.read ?? false,
-          todoId: todo.id,
-        };
+      const upsertGenerated = (base: AppNotification) => {
+        keepIds.add(base.id);
+        const existing = existingMap.get(base.id);
 
         if (!existing) {
           upsertLocal(base);
@@ -342,27 +361,96 @@ function App() {
           return;
         }
 
+        const nextItem: AppNotification = {
+          ...existing,
+          ...base,
+          read: existing.read,
+          createdAt: existing.createdAt ?? base.createdAt,
+        };
+
         const needsUpdate =
-          existing.message !== base.message ||
-          existing.scheduledAt !== base.scheduledAt ||
-          existing.source !== base.source ||
-          existing.todoId !== base.todoId;
+          existing.message !== nextItem.message ||
+          existing.scheduledAt !== nextItem.scheduledAt ||
+          existing.source !== nextItem.source ||
+          existing.todoId !== nextItem.todoId ||
+          existing.entityId !== nextItem.entityId ||
+          existing.kind !== nextItem.kind;
+
         if (needsUpdate) {
-          const nextItem = { ...existing, ...base, read: existing.read };
           upsertLocal(nextItem);
           updates.push(nextItem);
         }
+      };
+
+      todos.forEach(todo => {
+        if (!todo.dueDate || todo.completed) return;
+        const id = `todo:${todo.id}`;
+        const scheduledAt = getDayStartTs(todo.dueDate);
+        const base: AppNotification = {
+          id,
+          message: todo.text,
+          source: 'todo',
+          kind: 'todo-due',
+          scheduledAt,
+          createdAt: todo.createdAt ?? Date.now(),
+          todoId: todo.id,
+          entityId: todo.id,
+          read: false,
+        };
+        upsertGenerated(base);
+      });
+
+      const medicineAlerts = buildMedicineAlerts(medicines, notificationWindowStartTs);
+      medicineAlerts.forEach((alert) => {
+        const scheduledAt = getDayStartTs(alert.scheduledAt);
+        const offset = Math.round((scheduledAt - notificationWindowStartTs) / MS_DAY);
+        if (offset < 0 || offset > NOTIFICATION_WINDOW_DAYS) return;
+
+        const id = `medicine:${alert.medicineId}:${alert.kind}:${scheduledAt}`;
+        const base: AppNotification = {
+          id,
+          message: alert.label,
+          source: 'medicine',
+          kind: alert.kind === 'refill-end' ? 'medicine-refill-end' : 'medicine-refill-soon',
+          scheduledAt,
+          createdAt: Date.now(),
+          read: false,
+          entityId: alert.medicineId,
+        };
+        upsertGenerated(base);
+      });
+
+      expenses.forEach((expense) => {
+        if (!Number.isFinite(expense.amount) || expense.amount < HIGH_EXPENSE_THRESHOLD) return;
+        windowDayStarts.forEach((dayStartTs) => {
+          if (!isExpenseDueOnDay(expense, dayStartTs)) return;
+
+          const id = `expense:${expense.id}:due:${dayStartTs}`;
+          const amountLabel = Math.round(expense.amount).toLocaleString('es-CO');
+          const base: AppNotification = {
+            id,
+            message: `${expense.title} due ($${amountLabel})`,
+            source: 'expense',
+            kind: 'expense-due',
+            scheduledAt: dayStartTs,
+            createdAt: Date.now(),
+            read: false,
+            entityId: expense.id,
+          };
+          upsertGenerated(base);
+        });
       });
 
       notifications.forEach(item => {
-        if (item.source !== 'todo') return;
+        if (item.source === 'reminder') return;
         if (!keepIds.has(item.id)) {
           deletions.push(item.id);
         }
       });
 
       if (updates.length > 0 || deletions.length > 0) {
-        const filtered = nextNotifications.filter(n => !deletions.includes(n.id));
+        const toDeleteSet = new Set(deletions);
+        const filtered = nextNotifications.filter(n => !toDeleteSet.has(n.id));
         if (!cancelled) {
           setNotifications(filtered);
         }
@@ -376,11 +464,11 @@ function App() {
       }
     };
 
-    syncTodoNotifications();
+    syncGeneratedNotifications();
     return () => {
       cancelled = true;
     };
-  }, [notifications, notificationsReady, todos]);
+  }, [expenses, medicines, notificationWindowStartTs, notifications, notificationsReady, todos]);
 
   useEffect(() => {
     if (!isReminderPanelOpen) return;
@@ -1077,7 +1165,7 @@ function App() {
                   <div className="flex-1 min-w-0">
                     <p className="text-sm text-slate-200 break-words">{item.message}</p>
                     <div className="flex items-center gap-2 text-[10px] text-slate-500 mt-1">
-                      <span className="uppercase tracking-wide">{item.source === 'todo' ? 'Tarea' : 'Recordatorio'}</span>
+                      <span className="uppercase tracking-wide">{getNotificationSourceLabel(item.source)}</span>
                       <span>{formatSchedule(item.scheduledAt)}</span>
                     </div>
                   </div>

@@ -2,6 +2,7 @@
 import React, { useMemo, useState } from 'react';
 import { Todo, Priority, Medicine } from '../types';
 import { ChevronLeftIcon, ChevronRightIcon, CheckIcon } from './Icons';
+import { buildMedicineAlerts, getDateKeyFromTimestamp, groupMedicineAlertsByDate } from '../utils/medicineAlerts';
 
 interface CalendarPanelProps {
   todos: Todo[];
@@ -58,45 +59,14 @@ export const CalendarPanel: React.FC<CalendarPanelProps> = ({
   const isSameDay = (d1: Date, d2: Date) =>
     d1.getDate() === d2.getDate() && d1.getMonth() === d2.getMonth() && d1.getFullYear() === d2.getFullYear();
 
-  const MS_DAY = 24 * 60 * 60 * 1000;
-  const getDayStart = (date: Date) => new Date(date.getFullYear(), date.getMonth(), date.getDate());
-  const getDateKey = (date: Date) => {
-    const day = getDayStart(date);
-    const y = day.getFullYear();
-    const m = String(day.getMonth() + 1).padStart(2, '0');
-    const d = String(day.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
-  };
-
-  const getRemainingDays = (med: Medicine, todayStart: number) => {
-    const lastUpdated = med.lastUpdated ?? todayStart;
-    const remaining = Number.isFinite(med.remaining) ? med.remaining : 30;
-    const daysPassed = Math.max(0, Math.floor((todayStart - lastUpdated) / MS_DAY));
-    return Math.max(0, remaining - daysPassed);
-  };
-
-  const todayStart = getDayStart(new Date()).getTime();
+  const todayStart = (() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  })();
 
   const medicineAlertsByDate = useMemo(() => {
-    const map = new Map<string, Array<{ id: string; label: string; kind: 'refill-end' | 'refill-soon' }>>();
-
-    medicines.forEach((med) => {
-      if (!med.alarmEnabled) return;
-      const remainingDays = getRemainingDays(med, todayStart);
-      const endDate = new Date(todayStart + remainingDays * MS_DAY);
-      const endKey = getDateKey(endDate);
-      const endLabel = `${med.name} ends`;
-      map.set(endKey, [...(map.get(endKey) || []), { id: `${med.id}-end`, label: endLabel, kind: 'refill-end' }]);
-
-      if (remainingDays >= 7) {
-        const warnDate = new Date(todayStart + (remainingDays - 7) * MS_DAY);
-        const warnKey = getDateKey(warnDate);
-        const warnLabel = `${med.name} refill soon`;
-        map.set(warnKey, [...(map.get(warnKey) || []), { id: `${med.id}-soon`, label: warnLabel, kind: 'refill-soon' }]);
-      }
-    });
-
-    return map;
+    const alerts = buildMedicineAlerts(medicines, todayStart);
+    return groupMedicineAlertsByDate(alerts);
   }, [medicines, todayStart]);
 
   const sortTasksByRules = (tasks: Todo[]) => {
@@ -162,7 +132,7 @@ export const CalendarPanel: React.FC<CalendarPanelProps> = ({
       const isToday = isSameDay(new Date(), dateObj);
       const tasks = getTasksForDay(day);
       const summary = buildDaySummary(tasks);
-      const alertKey = getDateKey(dateObj);
+      const alertKey = getDateKeyFromTimestamp(dateObj.getTime());
       const medAlerts = medicineAlertsByDate.get(alertKey) || [];
       const medSummary = medAlerts.length === 1 ? medAlerts[0].label : medAlerts.length > 1 ? `${medAlerts.length} med alerts` : null;
 
@@ -211,7 +181,7 @@ export const CalendarPanel: React.FC<CalendarPanelProps> = ({
     () => (selectedDate ? sortTasksByRules(getTasksForDate(selectedDate)) : []),
     [selectedDate, todos, year, month]
   );
-  const selectedDateAlerts = selectedDate ? medicineAlertsByDate.get(getDateKey(selectedDate)) || [] : [];
+  const selectedDateAlerts = selectedDate ? medicineAlertsByDate.get(getDateKeyFromTimestamp(selectedDate.getTime())) || [] : [];
 
   return (
     <div className="h-full flex flex-col pb-20 max-w-6xl mx-auto animate-in fade-in duration-300">

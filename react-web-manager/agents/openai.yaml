@@ -1,0 +1,4 @@
+interface:
+  display_name: "React Web Manager"
+  short_description: "Gestion React/TSX y git automatizado"
+  default_prompt: "Gestiona paginas React/TSX: verifica sync git, analiza estructura, implementa cambios, valida build y realiza commit/push cuando corresponda."
