@@ -1066,10 +1066,10 @@ function App() {
       .sort((a, b) => a.scheduledAt - b.scheduledAt);
   }, [notifications, notificationFilter, nowTs]);
 
-  const unreadCount = useMemo(() => {
+  const weeklyUnreadCount = useMemo(() => {
     return notifications.filter(item => {
       const offset = getDayOffset(item.scheduledAt);
-      return offset === 0 && item.scheduledAt <= nowTs && !item.read;
+      return offset >= 0 && offset <= 6 && !item.read;
     }).length;
   }, [notifications, nowTs]);
 
@@ -1105,9 +1105,9 @@ function App() {
           title="Notifications"
         >
           <BellIcon className="w-5 h-5 text-slate-200" />
-          {unreadCount > 0 && (
+          {weeklyUnreadCount > 0 && (
             <span className="absolute -top-1 -right-1 bg-rose-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">
-              {unreadCount}
+              {weeklyUnreadCount}
             </span>
           )}
         </button>
