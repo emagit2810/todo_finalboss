@@ -94,6 +94,7 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
   const saveTimerRef = useRef<number | null>(null);
   const skipSaveRef = useRef(false);
   const noteKeysRef = useRef<Map<string, CryptoKey>>(new Map());
+  const editorTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [unlockedNoteIds, setUnlockedNoteIds] = useState<string[]>([]);
   const [unlockedFolderIds, setUnlockedFolderIds] = useState<string[]>([]);
 
@@ -248,6 +249,14 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
 
   const activeNote = activeNoteId ? notes.find((n) => n.id === activeNoteId) || null : null;
   const isNoteLocked = !!(activeNote?.locked && !unlockedNoteIds.includes(activeNote.id));
+
+  useEffect(() => {
+    if (!activeNoteId || isNoteLocked) return;
+    const frameId = window.requestAnimationFrame(() => {
+      editorTextareaRef.current?.focus();
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, [activeNoteId, isNoteLocked]);
 
   const loadNoteToDraft = async (note: NoteDoc | null) => {
     skipSaveRef.current = true;
@@ -1207,6 +1216,7 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
                     </div>
                   )}
                   <textarea
+                    ref={editorTextareaRef}
                     value={draftContent}
                     onChange={(e) => setDraftContent(e.target.value)}
                     placeholder={isNoteLocked ? 'Documento bloqueado' : 'Escribe aqui...'}

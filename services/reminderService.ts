@@ -15,6 +15,21 @@ interface ReminderResponse {
   errorCode?: string;
 }
 
+export interface DailyTopTaskSnapshot {
+  id: string;
+  title: string;
+  priority: 'P1' | 'P2' | 'P3' | 'P4';
+  number: number;
+  due_date?: string | null;
+}
+
+interface DailyTopSyncResponse {
+  ok: boolean;
+  status: 'updated' | 'unchanged' | 'empty_top5';
+  count: number;
+  updated_at: string;
+}
+
 export const sendReminder = async (
   text: string,
   contextData: { taskId?: string; priority?: number | string; type?: string; dueDate?: string | null }
@@ -75,6 +90,49 @@ export const sendReminder = async (
       errorCode: err?.code || undefined,
     };
   }
+};
+
+export const syncDailyTopSnapshot = async (
+  top5: DailyTopTaskSnapshot[],
+  timezone = 'America/Bogota'
+): Promise<DailyTopSyncResponse> => {
+  const body = {
+    top5: (top5 || []).slice(0, 5),
+    timezone,
+    source: 'todo_web_app',
+  };
+
+  const res = await fetch(`${API_URL}/v1/daily-top/sync`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${API_BEARER_TOKEN}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Error ${res.status}: ${errorText}`);
+  }
+
+  return await res.json();
+};
+
+export const sendDailyTopNow = async (): Promise<{ ok: boolean; status: string; date: string }> => {
+  const res = await fetch(`${API_URL}/v1/daily-top/send-now`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${API_BEARER_TOKEN}`,
+    },
+  });
+
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Error ${res.status}: ${errorText}`);
+  }
+
+  return await res.json();
 };
 
 // Helper para reintentar abrir el link desde un boton en notificacion / task.

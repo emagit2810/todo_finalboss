@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Todo, ViewMode, Medicine, Expense, Priority, Subtask, NoteDoc, NoteFolder, AppNotification } from './types';
 import { TodoItem } from './components/TodoItem';
 import { brainstormTasks } from './services/geminiService';
@@ -10,7 +10,7 @@ import { CalendarPanel } from './components/CalendarPanel';
 import { NotesPanel } from './components/NotesPanel';
 import { Sidebar } from './components/Sidebar';
 import * as db from './services/db';
-import { sendReminder, tryOpenWhatsAppLink } from './services/reminderService';
+import { sendReminder, sendDailyTopNow, tryOpenWhatsAppLink, syncDailyTopSnapshot, type DailyTopTaskSnapshot } from './services/reminderService';
 import { Toast } from './components/Toast';
 import { VoiceDictation } from './components/VoiceDictation';
 import { buildMedicineAlerts } from './utils/medicineAlerts';
@@ -29,6 +29,23 @@ const MS_HOUR = 60 * 60 * 1000;
 const MS_DAY = 24 * 60 * 60 * 1000;
 const HIGH_EXPENSE_THRESHOLD = 50000;
 const NOTIFICATION_WINDOW_DAYS = 6;
+const DAILY_TOP_TZ = 'America/Bogota';
+const DAILY_TOP_SYNC_DEBOUNCE_MS = 1200;
+const DAILY_TOP_RETRY_COOLDOWN_MS = 15 * 60 * 1000;
+
+const DAILY_TOP_DATE_FMT = new Intl.DateTimeFormat('en-CA', {
+  timeZone: DAILY_TOP_TZ,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
+const DAILY_TOP_PRIORITY_WEIGHT: Record<Priority, number> = {
+  P1: 1,
+  P2: 2,
+  P3: 3,
+  P4: 4,
+};
 
 const getDayStartTs = (timestamp: number) => {
   const date = new Date(timestamp);
@@ -58,6 +75,41 @@ const getNotificationSourceLabel = (source: AppNotification['source']) => {
   return 'Gasto';
 };
 
+const toBogotaDateKey = (timestamp: number) => DAILY_TOP_DATE_FMT.format(new Date(timestamp));
+
+const buildDailyTop5Snapshot = (todos: Todo[], nowTs: number): DailyTopTaskSnapshot[] => {
+  const todayKey = toBogotaDateKey(nowTs);
+
+  const candidate = todos.filter(todo => {
+    if (todo.completed) return false;
+    if (!todo.dueDate) return false;
+    return toBogotaDateKey(todo.dueDate) <= todayKey;
+  });
+
+  const ordered = [...candidate].sort((a, b) => {
+    const pa = DAILY_TOP_PRIORITY_WEIGHT[a.priority || 'P4'];
+    const pb = DAILY_TOP_PRIORITY_WEIGHT[b.priority || 'P4'];
+    if (pa !== pb) return pa - pb;
+
+    const na = Math.max(1, Math.round(a.complexity || 1));
+    const nb = Math.max(1, Math.round(b.complexity || 1));
+    if (na !== nb) return na - nb;
+
+    return (a.createdAt || 0) - (b.createdAt || 0);
+  });
+
+  return ordered.slice(0, 5).map(todo => ({
+    id: todo.id,
+    title: (todo.text || '').trim(),
+    priority: todo.priority || 'P4',
+    number: Math.max(1, Math.round(todo.complexity || 1)),
+    due_date: todo.dueDate ? toBogotaDateKey(todo.dueDate) : null,
+  }));
+};
+
+const serializeDailyTop5 = (top5: DailyTopTaskSnapshot[]) =>
+  JSON.stringify(top5.map(item => [item.id, item.title, item.priority, item.number, item.due_date || null]));
+
 function App() {
   // --- State: Todos ---
   const [todos, setTodos] = useState<Todo[]>([]);
@@ -80,6 +132,10 @@ function App() {
   const [isInputExpanded, setIsInputExpanded] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>(ViewMode.LIST);
   const [openNoteId, setOpenNoteId] = useState<string | null>(null);
+  const quickNoteInFlightRef = useRef(false);
+  const lastDailyTopHashRef = useRef('');
+  const lastDailyTopAttemptHashRef = useRef('');
+  const lastDailyTopAttemptAtRef = useRef(0);
   const [brainstormQuery, setBrainstormQuery] = useState('');
   const [brainstormLoading, setBrainstormLoading] = useState(false);
   const [brainstormSources, setBrainstormSources] = useState<Array<{uri: string, title: string}>>([]);
@@ -93,6 +149,7 @@ function App() {
   const [reminderText, setReminderText] = useState('');
   const [reminderEdited, setReminderEdited] = useState(false);
   const [reminderLoading, setReminderLoading] = useState(false);
+  const [dailyTopSendLoading, setDailyTopSendLoading] = useState(false);
   const [localReminderMode, setLocalReminderMode] = useState<'hours' | 'days' | 'minute'>('hours');
   const [localReminderHours, setLocalReminderHours] = useState(3);
   const [localReminderDays, setLocalReminderDays] = useState(1);
@@ -109,6 +166,7 @@ function App() {
   const [notificationsReady, setNotificationsReady] = useState(false);
   const [nowTs, setNowTs] = useState(Date.now());
   const notificationWindowStartTs = useMemo(() => getDayStartTs(nowTs), [nowTs]);
+  const dailyTop5 = useMemo(() => buildDailyTop5Snapshot(todos, nowTs), [todos, nowTs]);
 
   // --- Initialization (Load from IndexedDB) ---
   useEffect(() => {
@@ -490,6 +548,36 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    const nextHash = serializeDailyTop5(dailyTop5);
+    if (nextHash === lastDailyTopHashRef.current) return;
+    if (
+      nextHash === lastDailyTopAttemptHashRef.current &&
+      Date.now() - lastDailyTopAttemptAtRef.current < DAILY_TOP_RETRY_COOLDOWN_MS
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    lastDailyTopAttemptHashRef.current = nextHash;
+    lastDailyTopAttemptAtRef.current = Date.now();
+    const timeoutId = window.setTimeout(async () => {
+      try {
+        await syncDailyTopSnapshot(dailyTop5, DAILY_TOP_TZ);
+        if (!cancelled) {
+          lastDailyTopHashRef.current = nextHash;
+        }
+      } catch (error) {
+        console.warn('No se pudo sincronizar el top 5 diario:', error);
+      }
+    }, DAILY_TOP_SYNC_DEBOUNCE_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [dailyTop5]);
+
   // --- Handlers: Medicines ---
   const handleAddMedicine = async (med: Medicine) => {
       setMedicines(prev => [...prev, med]);
@@ -523,10 +611,10 @@ function App() {
   };
 
   // --- Handlers: Notes ---
-  const handleAddNote = async (note: NoteDoc) => {
+  const handleAddNote = useCallback(async (note: NoteDoc) => {
       setNotes(prev => [note, ...prev]);
       await db.putItem('notes', note);
-  };
+  }, []);
 
   const handleUpdateNote = async (updatedNote: NoteDoc) => {
       setNotes(prev => prev.map(n => n.id === updatedNote.id ? updatedNote : n));
@@ -561,6 +649,29 @@ function App() {
         }
       }
   };
+
+  const createQuickNote = useCallback(async () => {
+    if (quickNoteInFlightRef.current) return;
+    quickNoteInFlightRef.current = true;
+    try {
+      const now = Date.now();
+      const quickNote: NoteDoc = {
+        id: crypto.randomUUID(),
+        title: 'Untitled',
+        content: '',
+        folderId: null,
+        tags: [],
+        createdAt: now,
+        updatedAt: now,
+        locked: false,
+      };
+      await handleAddNote(quickNote);
+      setViewMode(ViewMode.NOTES);
+      setOpenNoteId(quickNote.id);
+    } finally {
+      quickNoteInFlightRef.current = false;
+    }
+  }, [handleAddNote]);
 
     // --- Handler: Reminder (panel actions) ---
   const handleSendReminder = async () => {
@@ -658,6 +769,30 @@ function App() {
       setIsReminderPanelOpen(false);
   };
 
+  const handleSendDailyTopNow = async () => {
+    try {
+      setDailyTopSendLoading(true);
+      const res = await sendDailyTopNow();
+      if (res.status === 'already_sent') {
+        setNotification({ message: 'Top 5 ya enviado hoy', type: 'success' });
+        return;
+      }
+      if (res.status === 'no_snapshot') {
+        setNotification({ message: 'Aun no hay snapshot top 5 para enviar', type: 'error' });
+        return;
+      }
+      if (res.status === 'empty_top5') {
+        setNotification({ message: 'No hay tareas top 5 para enviar hoy', type: 'error' });
+        return;
+      }
+      setNotification({ message: 'Top 5 enviado a Telegram', type: 'success' });
+    } catch (error: any) {
+      setNotification({ message: error?.message || 'Error enviando top 5', type: 'error' });
+    } finally {
+      setDailyTopSendLoading(false);
+    }
+  };
+
 
   // --- Voice Agent & AI Helpers ---
 
@@ -735,6 +870,21 @@ function App() {
   const openExpensesFromCalendar = useCallback(() => {
     setViewMode(ViewMode.EXPENSES);
   }, []);
+
+  useEffect(() => {
+    const handleGlobalKeyDown = (event: KeyboardEvent) => {
+      if (event.repeat) return;
+      const isQuickNoteShortcut = event.ctrlKey && event.altKey && event.code === 'KeyN';
+      if (!isQuickNoteShortcut) return;
+      event.preventDefault();
+      void createQuickNote();
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleGlobalKeyDown);
+    };
+  }, [createQuickNote]);
 
   // --- Render Content Area ---
   const renderContent = () => {
@@ -1354,6 +1504,13 @@ function App() {
             </div>
 
             <div className="mt-5 flex items-center justify-end gap-2">
+              <button
+                onClick={handleSendDailyTopNow}
+                disabled={dailyTopSendLoading}
+                className="px-4 py-2 rounded-lg bg-emerald-700 text-white hover:bg-emerald-600 disabled:opacity-50"
+              >
+                {dailyTopSendLoading ? 'Enviando top 5...' : 'Enviar top 5 ahora (test)'}
+              </button>
               <button
                 onClick={closeReminderPanel}
                 className="px-4 py-2 rounded-lg bg-slate-800 text-slate-200 hover:bg-slate-700"
