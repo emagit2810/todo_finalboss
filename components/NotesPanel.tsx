@@ -21,7 +21,6 @@ interface NotesPanelProps {
 }
 
 const PASSWORD_ITERATIONS = 100000;
-const AUTOSAVE_DELAY_MS = 700;
 const PRESET_TAGS = [
   'prompt estudio',
   'prompt problema',
@@ -91,8 +90,6 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
   
   const cryptoReady = typeof crypto !== 'undefined' && !!crypto.subtle;
 
-  const saveTimerRef = useRef<number | null>(null);
-  const skipSaveRef = useRef(false);
   const noteKeysRef = useRef<Map<string, CryptoKey>>(new Map());
   const editorTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [unlockedNoteIds, setUnlockedNoteIds] = useState<string[]>([]);
@@ -259,11 +256,6 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
   }, [activeNoteId, isNoteLocked]);
 
   const loadNoteToDraft = async (note: NoteDoc | null) => {
-    skipSaveRef.current = true;
-    if (saveTimerRef.current) {
-      clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
-    }
     setLocalError(null);
     setNoteLockPassword('');
     setNoteLockConfirm('');
@@ -308,7 +300,6 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
     const targetNote = notes.find((n) => n.id === requestedNoteId) || null;
 
     const openRequestedNote = async () => {
-      await persistDraft();
       if (!targetNote) {
         setLocalError('Documento no encontrado.');
         return;
@@ -349,15 +340,6 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
 
     void openRequestedNote();
   }, [openNoteId, notes, folderMap, unlockedFolderIds, onConsumeOpenNoteId]);
-
-  const scheduleSave = () => {
-    if (saveTimerRef.current) {
-      clearTimeout(saveTimerRef.current);
-    }
-    saveTimerRef.current = window.setTimeout(() => {
-      void persistDraft();
-    }, AUTOSAVE_DELAY_MS);
-  };
 
   const persistDraft = async () => {
     if (!activeNote) return;
@@ -406,20 +388,17 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
   };
 
   useEffect(() => {
-    if (skipSaveRef.current) {
-      skipSaveRef.current = false;
-      return;
-    }
-    scheduleSave();
-  }, [draftTitle, draftContent, draftTags]);
-
-  useEffect(() => {
-    return () => {
-      if (saveTimerRef.current) {
-        clearTimeout(saveTimerRef.current);
-      }
+    const handleSaveShortcut = (event: KeyboardEvent) => {
+      const isSaveShortcut = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's';
+      if (!isSaveShortcut) return;
+      event.preventDefault();
+      if (!activeNote || isNoteLocked) return;
+      void persistDraft();
     };
-  }, []);
+
+    window.addEventListener('keydown', handleSaveShortcut);
+    return () => window.removeEventListener('keydown', handleSaveShortcut);
+  }, [activeNote, isNoteLocked, persistDraft]);
 
   const handleCreateFolder = async () => {
     const name = newFolderName.trim();
@@ -812,9 +791,8 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
                           return (
                             <button
                               key={note.id}
-                              onClick={async () => {
+                              onClick={() => {
                                 if (folderLocked) return;
-                                await persistDraft();
                                 setActiveFolderId(note.folderId ?? null);
                                 setActiveNoteId(note.id);
                               }}
@@ -878,9 +856,8 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
                                   return (
                                     <button
                                       key={note.id}
-                                      onClick={async () => {
+                                      onClick={() => {
                                         if (locked) return;
-                                        await persistDraft();
                                         setActiveFolderId(node.id);
                                         setActiveNoteId(note.id);
                                       }}
@@ -909,8 +886,7 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
                       return (
                         <button
                           key={note.id}
-                          onClick={async () => {
-                            await persistDraft();
+                          onClick={() => {
                             setActiveFolderId(null);
                             setActiveNoteId(note.id);
                           }}
@@ -1074,8 +1050,7 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
                 {filteredNotes.map((note) => (
                   <button
                     key={note.id}
-                    onClick={async () => {
-                      await persistDraft();
+                    onClick={() => {
                       setActiveNoteId(note.id);
                     }}
                     className={`w-full text-left px-2 py-2 rounded-md text-sm flex items-center gap-2 ${activeNoteId === note.id ? 'bg-indigo-600/10 text-indigo-200' : 'text-slate-300 hover:bg-slate-800'}`}
