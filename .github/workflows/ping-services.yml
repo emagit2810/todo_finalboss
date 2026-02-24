@@ -2,8 +2,8 @@ name: Ping External Services
 
 on:
   schedule:
-    # Ejecutar cada 30 minutos (formato cron: minuto hora día-mes mes día-semana)
-    - cron: '*/30 * * * *'
+    # Ejecutar cada 2 horas (formato cron: minuto hora día-mes mes día-semana)
+    - cron: '0 */2 * * *'
   workflow_dispatch: # Permite ejecutar manualmente
 
 jobs:
