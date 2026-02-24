@@ -13,6 +13,7 @@ interface TodoItemProps {
   onOpenNote?: (noteId: string) => void;
   onOpenAttachment?: (attachment: AttachmentMeta) => void;
   onDeleteAttachment?: (todoId: string, attachmentId: string) => void;
+  isDropTarget?: boolean;
 }
 
 export const TodoItem: React.FC<TodoItemProps> = ({
@@ -24,6 +25,7 @@ export const TodoItem: React.FC<TodoItemProps> = ({
   onOpenNote,
   onOpenAttachment,
   onDeleteAttachment,
+  isDropTarget = false,
 }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [newSubtask, setNewSubtask] = useState('');
@@ -141,7 +143,15 @@ export const TodoItem: React.FC<TodoItemProps> = ({
   };
 
   return (
-    <div className="group bg-slate-800/50 hover:bg-slate-800 p-4 rounded-xl border border-slate-700/50 hover:border-slate-600 transition-all duration-200 mb-4 shadow-sm">
+    <div
+      data-drop-scope="todo"
+      data-drop-id={todo.id}
+      className={`group bg-slate-800/50 hover:bg-slate-800 p-4 rounded-xl border transition-all duration-200 mb-4 shadow-sm ${
+        isDropTarget
+          ? 'border-indigo-400 ring-2 ring-indigo-400/70'
+          : 'border-slate-700/50 hover:border-slate-600'
+      }`}
+    >
       {/* Top Row: Title, Priority, Complexity */}
       <div className="flex items-start justify-between gap-4">
           <div className="flex items-center gap-3 flex-1">

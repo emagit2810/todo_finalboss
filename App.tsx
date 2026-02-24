@@ -16,7 +16,10 @@ import { VoiceDictation } from './components/VoiceDictation';
 import { buildMedicineAlerts } from './utils/medicineAlerts';
 
 type NotificationFilter = 'today' | 'tomorrow' | 'week';
-type DropTargetType = 'todo' | 'note';
+type DropTarget =
+  | { type: 'todo'; id: string }
+  | { type: 'note'; id: string }
+  | { type: 'new_todo_input' };
 
 type ReminderOptions = {
   sendToApi: boolean;
@@ -151,13 +154,6 @@ const validateAttachmentFile = (file: File) => {
   return { valid: true, reason: '' };
 };
 
-const formatAttachmentSize = (size: number) => {
-  if (size < 1024) return `${size} B`;
-  const kb = size / 1024;
-  if (kb < 1024) return `${kb.toFixed(1)} KB`;
-  return `${(kb / 1024).toFixed(1)} MB`;
-};
-
 function App() {
   // --- State: Todos ---
   const [todos, setTodos] = useState<Todo[]>([]);
@@ -194,13 +190,9 @@ function App() {
 
   // State for attachment drag/drop
   const dragDepthRef = useRef(0);
+  const lastAttachmentTargetRef = useRef<DropTarget | null>(null);
   const [isDragOverlayVisible, setIsDragOverlayVisible] = useState(false);
-  const [isDropModalOpen, setIsDropModalOpen] = useState(false);
-  const [pendingDroppedFiles, setPendingDroppedFiles] = useState<File[]>([]);
-  const [dropValidationErrors, setDropValidationErrors] = useState<string[]>([]);
-  const [dropTargetType, setDropTargetType] = useState<DropTargetType>('todo');
-  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
-  const [dropTargetQuery, setDropTargetQuery] = useState('');
+  const [dragTargetPreview, setDragTargetPreview] = useState<DropTarget | null>(null);
   const [dropProcessing, setDropProcessing] = useState(false);
 
   // --- State: Reminder / Notification ---
@@ -325,7 +317,13 @@ function App() {
   }, []);
 
   // --- Handlers: Todos ---
-  const addTodo = useCallback(async (text: string, priority: Priority = 'P4', dateOverride?: number, linkedNoteId?: string) => {
+  const addTodo = useCallback(async (
+    text: string,
+    priority: Priority = 'P4',
+    dateOverride?: number,
+    linkedNoteId?: string,
+    attachments?: AttachmentMeta[],
+  ) => {
     if (!text.trim()) return;
     
     const now = Date.now();
@@ -341,6 +339,7 @@ function App() {
         priority,
         dueDate: resolvedDueDate,
         linkedNotes: linkedNoteId ? [linkedNoteId] : undefined,
+        attachments: attachments && attachments.length ? attachments : undefined,
     };
 
     // Optimistic
@@ -355,7 +354,21 @@ function App() {
     setNoteLinkQuery('');
     
     // DB Update
-    await db.putItem('todos', newTodo);
+    try {
+      await db.putItem('todos', newTodo);
+    } catch (error) {
+      setTodos((prev) => prev.filter((todo) => todo.id !== newTodo.id));
+      if (attachments && attachments.length > 0) {
+        for (const attachment of attachments) {
+          try {
+            await db.deleteAttachmentBlob(attachment.id);
+          } catch (cleanupError) {
+            console.error('No se pudo limpiar adjunto tras fallo al crear tarea', cleanupError);
+          }
+        }
+      }
+      throw error;
+    }
   }, [inputDueDate]);
 
   const handleUpdateTodo = useCallback(async (updatedTodo: Todo) => {
@@ -726,15 +739,11 @@ function App() {
       }
   };
 
-  const closeDropModal = useCallback(() => {
-    setIsDropModalOpen(false);
-    setPendingDroppedFiles([]);
-    setDropValidationErrors([]);
-    setDropTargetQuery('');
-    setDropTargetId(null);
-    setDropProcessing(false);
-    setIsDragOverlayVisible(false);
-  }, []);
+  const stripFileExtension = (name: string) => {
+    const dotIndex = name.lastIndexOf('.');
+    if (dotIndex <= 0) return name;
+    return name.slice(0, dotIndex);
+  };
 
   const saveAttachmentBlobs = async (files: File[]) => {
     const saved: AttachmentMeta[] = [];
@@ -771,7 +780,6 @@ function App() {
     }
 
     const currentAttachments = todo.attachments || [];
-
     const dedupedFiles = files.filter((file) => {
       const cleanName = sanitizeAttachmentName(file.name);
       return !currentAttachments.some((a) => a.name === cleanName && a.size === file.size);
@@ -804,7 +812,6 @@ function App() {
     }
 
     const currentAttachments = note.attachments || [];
-
     const dedupedFiles = files.filter((file) => {
       const cleanName = sanitizeAttachmentName(file.name);
       return !currentAttachments.some((a) => a.name === cleanName && a.size === file.size);
@@ -882,40 +889,67 @@ function App() {
     }
   }, [notes]);
 
-  const filteredTodoDropTargets = useMemo(() => {
-    const query = dropTargetQuery.trim().toLowerCase();
-    const list = [...todos].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-    if (!query) return list;
-    return list.filter((todo) => {
-      const haystack = `${todo.text} ${todo.description || ''}`.toLowerCase();
-      return haystack.includes(query);
-    });
-  }, [dropTargetQuery, todos]);
+  const resolveDropTargetFromElement = useCallback((element: Element | null): DropTarget | null => {
+    if (!element) return null;
+    const zone = element.closest('[data-drop-scope]');
+    if (!zone) return null;
+    const scope = zone.getAttribute('data-drop-scope');
+    const dropId = zone.getAttribute('data-drop-id');
+    if (scope === 'todo' && dropId) {
+      return { type: 'todo', id: dropId };
+    }
+    if (scope === 'note' && dropId) {
+      return { type: 'note', id: dropId };
+    }
+    if (scope === 'new_todo_input') {
+      return { type: 'new_todo_input' };
+    }
+    return null;
+  }, []);
 
-  const filteredNoteDropTargets = useMemo(() => {
-    const query = dropTargetQuery.trim().toLowerCase();
-    const list = [...notes].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    if (!query) return list;
-    return list.filter((note) => {
-      const haystack = `${note.title} ${note.content || ''}`.toLowerCase();
-      return haystack.includes(query);
-    });
-  }, [dropTargetQuery, notes]);
+  const resolveDefaultDropTarget = useCallback((): DropTarget | null => {
+    if (viewMode === ViewMode.LIST) {
+      return { type: 'new_todo_input' };
+    }
+    if (viewMode === ViewMode.NOTES) {
+      const firstUnlockedNote = notes.find((note) => !note.locked);
+      if (firstUnlockedNote) {
+        return { type: 'note', id: firstUnlockedNote.id };
+      }
+    }
+    if (todos.length > 0) {
+      return { type: 'todo', id: todos[0].id };
+    }
+    const firstUnlockedNote = notes.find((note) => !note.locked);
+    if (firstUnlockedNote) {
+      return { type: 'note', id: firstUnlockedNote.id };
+    }
+    return { type: 'new_todo_input' };
+  }, [notes, todos, viewMode]);
 
-  const processDroppedFiles = useCallback((files: File[]) => {
-    if (files.length === 0) return;
+  const describeDropTarget = useCallback((target: DropTarget | null) => {
+    if (!target) return 'destino no detectado';
+    if (target.type === 'new_todo_input') return 'nueva tarea';
+    if (target.type === 'todo') {
+      const todo = todos.find((item) => item.id === target.id);
+      return todo ? `tarea: ${todo.text}` : 'tarea';
+    }
+    const note = notes.find((item) => item.id === target.id);
+    return note ? `nota: ${note.title || 'Untitled'}` : 'nota';
+  }, [notes, todos]);
 
+  const collectValidDropFiles = useCallback((files: File[]) => {
     const validFiles: File[] = [];
     const errors: string[] = [];
-    const dropDedup = new Set<string>();
+    const dedupInDrop = new Set<string>();
 
     for (const file of files) {
-      const dedupKey = `${file.name.toLowerCase()}::${file.size}::${file.lastModified}`;
-      if (dropDedup.has(dedupKey)) {
+      const dropKey = `${file.name.toLowerCase()}::${file.size}::${file.lastModified}`;
+      if (dedupInDrop.has(dropKey)) {
         errors.push(`Duplicado omitido: ${file.name}`);
         continue;
       }
-      dropDedup.add(dedupKey);
+      dedupInDrop.add(dropKey);
 
       const validation = validateAttachmentFile(file);
       if (!validation.valid) {
@@ -927,98 +961,101 @@ function App() {
         errors.push(`Solo se permiten ${MAX_ATTACHMENTS_PER_ENTITY} archivos por carga.`);
         break;
       }
-
       validFiles.push(file);
     }
 
-    if (validFiles.length === 0) {
-      const firstError = errors[0] || 'No se detectaron archivos validos.';
-      setNotification({ message: firstError, type: 'error' });
-      setDropValidationErrors(errors);
-      return;
-    }
+    return { validFiles, errors };
+  }, []);
 
-    setPendingDroppedFiles(validFiles);
-    setDropValidationErrors(errors);
-
-    if (viewMode === ViewMode.NOTES && notes.length > 0) {
-      setDropTargetType('note');
-      const firstUnlockedNote = notes.find((note) => !note.locked);
-      setDropTargetId((firstUnlockedNote || notes[0]).id);
-    } else if (todos.length > 0) {
-      setDropTargetType('todo');
-      setDropTargetId(todos[0].id);
-    } else if (notes.length > 0) {
-      setDropTargetType('note');
-      const firstUnlockedNote = notes.find((note) => !note.locked);
-      setDropTargetId((firstUnlockedNote || notes[0]).id);
-    } else {
-      setPendingDroppedFiles([]);
-      setNotification({ message: 'Crea una tarea o nota antes de adjuntar archivos.', type: 'error' });
-      return;
-    }
-
-    setDropTargetQuery('');
-    setIsDropModalOpen(true);
-  }, [notes, todos, viewMode]);
-
-  const confirmDroppedAttachments = useCallback(async () => {
+  const handleAutomaticAttachmentDrop = useCallback(async (files: File[], resolvedTarget: DropTarget | null) => {
     if (dropProcessing) return;
-    if (!dropTargetId) {
-      setNotification({ message: 'Selecciona un destino.', type: 'error' });
+    const { validFiles, errors } = collectValidDropFiles(files);
+    if (validFiles.length === 0) {
+      setNotification({ message: errors[0] || 'No se detectaron archivos validos.', type: 'error' });
       return;
     }
-    if (pendingDroppedFiles.length === 0) {
-      setNotification({ message: 'No hay archivos pendientes para adjuntar.', type: 'error' });
+
+    const target = resolvedTarget || lastAttachmentTargetRef.current || resolveDefaultDropTarget();
+    if (!target) {
+      setNotification({ message: 'No fue posible detectar destino del adjunto.', type: 'error' });
       return;
     }
 
     setDropProcessing(true);
     try {
-      if (dropTargetType === 'todo') {
-        const count = await attachFilesToTodo(dropTargetId, pendingDroppedFiles);
-        setNotification({ message: `${count} adjunto(s) guardado(s) en la tarea.`, type: 'success' });
+      const skippedSuffix = errors.length > 0 ? ` (${errors.length} omitido(s))` : '';
+      if (target.type === 'todo') {
+        const count = await attachFilesToTodo(target.id, validFiles);
+        setNotification({
+          message: `${count} adjunto(s) guardado(s) en ${describeDropTarget(target)}${skippedSuffix}`,
+          type: 'success',
+        });
+      } else if (target.type === 'note') {
+        const count = await attachFilesToNote(target.id, validFiles);
+        setNotification({
+          message: `${count} adjunto(s) guardado(s) en ${describeDropTarget(target)}${skippedSuffix}`,
+          type: 'success',
+        });
       } else {
-        const count = await attachFilesToNote(dropTargetId, pendingDroppedFiles);
-        setNotification({ message: `${count} adjunto(s) guardado(s) en la nota.`, type: 'success' });
+        const preparedAttachments = await saveAttachmentBlobs(validFiles);
+        const defaultText = stripFileExtension(sanitizeAttachmentName(validFiles[0].name));
+        const todoText = inputValue.trim() || defaultText || 'Nueva tarea';
+        await addTodo(todoText, inputPriority, undefined, undefined, preparedAttachments);
+        setNotification({
+          message: `${preparedAttachments.length} adjunto(s) en nueva tarea${skippedSuffix}`,
+          type: 'success',
+        });
       }
-      closeDropModal();
+      if (errors.length > 0) {
+        console.warn('Archivos omitidos en drop:', errors);
+      }
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'No se pudieron guardar los adjuntos.';
+      const message = error instanceof Error ? error.message : 'No se pudieron adjuntar los archivos.';
       setNotification({ message, type: 'error' });
     } finally {
       setDropProcessing(false);
     }
-  }, [attachFilesToNote, attachFilesToTodo, closeDropModal, dropProcessing, dropTargetId, dropTargetType, pendingDroppedFiles]);
+  }, [
+    addTodo,
+    attachFilesToNote,
+    attachFilesToTodo,
+    collectValidDropFiles,
+    describeDropTarget,
+    dropProcessing,
+    inputPriority,
+    inputValue,
+    resolveDefaultDropTarget,
+  ]);
 
   useEffect(() => {
-    if (!isDropModalOpen) return;
-    if (dropTargetType === 'todo') {
-      if (filteredTodoDropTargets.length === 0) {
-        setDropTargetId(null);
-        return;
+    const rememberTarget = (event: Event) => {
+      const targetElement = event.target as Element | null;
+      const resolved = resolveDropTargetFromElement(targetElement);
+      if (resolved) {
+        lastAttachmentTargetRef.current = resolved;
       }
-      const exists = filteredTodoDropTargets.some((todo) => todo.id === dropTargetId);
-      if (!exists) {
-        setDropTargetId(filteredTodoDropTargets[0].id);
-      }
-      return;
-    }
-
-    if (filteredNoteDropTargets.length === 0) {
-      setDropTargetId(null);
-      return;
-    }
-    const exists = filteredNoteDropTargets.some((note) => note.id === dropTargetId);
-    if (!exists) {
-      setDropTargetId(filteredNoteDropTargets[0].id);
-    }
-  }, [dropTargetId, dropTargetType, filteredNoteDropTargets, filteredTodoDropTargets, isDropModalOpen]);
+    };
+    document.addEventListener('focusin', rememberTarget, true);
+    document.addEventListener('pointerdown', rememberTarget, true);
+    return () => {
+      document.removeEventListener('focusin', rememberTarget, true);
+      document.removeEventListener('pointerdown', rememberTarget, true);
+    };
+  }, [resolveDropTargetFromElement]);
 
   useEffect(() => {
     const hasFilePayload = (event: DragEvent) => {
       if (!event.dataTransfer) return false;
       return Array.from(event.dataTransfer.types).includes('Files');
+    };
+
+    const inferTargetAtPointer = (event: DragEvent) => {
+      const pointerElement = document.elementFromPoint(event.clientX, event.clientY);
+      return (
+        resolveDropTargetFromElement(pointerElement) ||
+        lastAttachmentTargetRef.current ||
+        resolveDefaultDropTarget()
+      );
     };
 
     const onDragEnter = (event: DragEvent) => {
@@ -1027,12 +1064,14 @@ function App() {
       event.stopPropagation();
       dragDepthRef.current += 1;
       setIsDragOverlayVisible(true);
+      setDragTargetPreview(inferTargetAtPointer(event));
     };
 
     const onDragOver = (event: DragEvent) => {
       if (!hasFilePayload(event)) return;
       event.preventDefault();
       event.stopPropagation();
+      setDragTargetPreview(inferTargetAtPointer(event));
     };
 
     const onDragLeave = (event: DragEvent) => {
@@ -1041,18 +1080,20 @@ function App() {
       dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
       if (dragDepthRef.current === 0) {
         setIsDragOverlayVisible(false);
+        setDragTargetPreview(null);
       }
     };
 
     const onDrop = (event: DragEvent) => {
-      if (!event.dataTransfer) return;
-      const files = Array.from(event.dataTransfer.files || []);
-      if (files.length === 0) return;
       event.preventDefault();
       event.stopPropagation();
       dragDepthRef.current = 0;
       setIsDragOverlayVisible(false);
-      processDroppedFiles(files);
+      const files = Array.from(event.dataTransfer?.files || []);
+      const target = inferTargetAtPointer(event);
+      setDragTargetPreview(null);
+      if (files.length === 0) return;
+      void handleAutomaticAttachmentDrop(files, target);
     };
 
     window.addEventListener('dragenter', onDragEnter);
@@ -1066,17 +1107,7 @@ function App() {
       window.removeEventListener('dragleave', onDragLeave);
       window.removeEventListener('drop', onDrop);
     };
-  }, [processDroppedFiles]);
-
-  const selectedDropTodo = useMemo(() => {
-    if (dropTargetType !== 'todo' || !dropTargetId) return null;
-    return todos.find((todo) => todo.id === dropTargetId) || null;
-  }, [dropTargetId, dropTargetType, todos]);
-
-  const selectedDropNote = useMemo(() => {
-    if (dropTargetType !== 'note' || !dropTargetId) return null;
-    return notes.find((note) => note.id === dropTargetId) || null;
-  }, [dropTargetId, dropTargetType, notes]);
+  }, [handleAutomaticAttachmentDrop, resolveDefaultDropTarget, resolveDropTargetFromElement]);
 
   const createQuickNote = useCallback(async () => {
     if (quickNoteInFlightRef.current) return;
@@ -1316,6 +1347,14 @@ function App() {
 
   // --- Render Content Area ---
   const renderContent = () => {
+    const dragTargetTodoId = isDragOverlayVisible && dragTargetPreview?.type === 'todo'
+      ? dragTargetPreview.id
+      : null;
+    const dragTargetNoteId = isDragOverlayVisible && dragTargetPreview?.type === 'note'
+      ? dragTargetPreview.id
+      : null;
+    const isNewTodoDropTarget = isDragOverlayVisible && dragTargetPreview?.type === 'new_todo_input';
+
     if (viewMode === ViewMode.MEDICINES) {
         return (
             <MedicinePanel 
@@ -1372,6 +1411,7 @@ function App() {
                 onUpdateTodo={handleUpdateTodo}
                 onOpenAttachment={openAttachment}
                 onDeleteNoteAttachment={removeNoteAttachment}
+                activeDropNoteId={dragTargetNoteId}
             />
         );
     }
@@ -1406,7 +1446,12 @@ function App() {
             <div className="mb-8">
               {viewMode === ViewMode.LIST ? (
                  <>
-                 <div className={`relative transition-all duration-300 ease-in-out ${isInputExpanded ? 'h-48' : 'h-24 sm:h-20'}`}>
+                  <div
+                    data-drop-scope="new_todo_input"
+                    className={`relative transition-all duration-300 ease-in-out ${
+                      isInputExpanded ? 'h-48' : 'h-24 sm:h-20'
+                    } ${isNewTodoDropTarget ? 'ring-2 ring-indigo-400/80 rounded-xl' : ''}`}
+                  >
                    <textarea 
                      value={inputValue}
                      onChange={(e) => setInputValue(e.target.value)}
@@ -1622,6 +1667,7 @@ function App() {
                       onOpenNote={handleOpenNote}
                       onOpenAttachment={openAttachment}
                       onDeleteAttachment={removeTodoAttachment}
+                      isDropTarget={dragTargetTodoId === todo.id}
                     />
                   ))}
                 </div>
@@ -1799,182 +1845,13 @@ function App() {
            {renderContent()}
       </main>
 
-      {isDragOverlayVisible && !isDropModalOpen && (
+      {isDragOverlayVisible && (
         <div className="fixed inset-0 z-[80] pointer-events-none bg-indigo-500/10 border-2 border-dashed border-indigo-400/70 flex items-center justify-center">
           <div className="bg-slate-900/90 border border-indigo-400/50 rounded-xl px-5 py-3 text-sm text-indigo-100 shadow-xl">
-            Suelta aqui para adjuntar archivos
-          </div>
-        </div>
-      )}
-
-      {isDropModalOpen && (
-        <div
-          className="fixed inset-0 z-[95] flex items-center justify-center bg-black/65 backdrop-blur-sm p-4"
-          onClick={closeDropModal}
-        >
-          <div
-            className="w-full max-w-2xl bg-slate-900 border border-slate-700 rounded-2xl p-5 shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="text-xs uppercase tracking-wider text-slate-500">Adjuntar archivos</p>
-                <h3 className="text-lg font-semibold text-white">Selecciona destino para los adjuntos</h3>
-                <p className="text-xs text-slate-400 mt-1">
-                  Limite: {MAX_ATTACHMENTS_PER_ENTITY} archivos por carga, 20MB por archivo.
-                </p>
-              </div>
-              <button
-                onClick={closeDropModal}
-                className="text-slate-400 hover:text-white px-2 py-1 rounded hover:bg-slate-800"
-              >
-                Cerrar
-              </button>
-            </div>
-
-            <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/50 p-3">
-              <p className="text-xs uppercase tracking-wider text-slate-500 mb-2">Archivos detectados</p>
-              <div className="space-y-1 max-h-32 overflow-y-auto">
-                {pendingDroppedFiles.map((file) => (
-                  <div key={`${file.name}-${file.lastModified}`} className="flex items-center justify-between text-xs text-slate-300">
-                    <span className="truncate pr-2">{sanitizeAttachmentName(file.name)}</span>
-                    <span className="text-slate-500 shrink-0">{formatAttachmentSize(file.size)}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {dropValidationErrors.length > 0 && (
-              <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
-                <p className="text-xs uppercase tracking-wider text-amber-300 mb-1">Archivos omitidos</p>
-                <div className="space-y-1 max-h-20 overflow-y-auto">
-                  {dropValidationErrors.map((errorText, index) => (
-                    <p key={`${errorText}-${index}`} className="text-xs text-amber-200">
-                      - {errorText}
-                    </p>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div className="mt-4 flex gap-2">
-              <button
-                onClick={() => setDropTargetType('todo')}
-                className={`px-3 py-1.5 text-xs rounded-full border transition-colors ${
-                  dropTargetType === 'todo'
-                    ? 'bg-indigo-600/20 text-indigo-200 border-indigo-500/50'
-                    : 'border-slate-700 text-slate-400 hover:text-slate-200 hover:border-slate-500'
-                }`}
-              >
-                Tareas
-              </button>
-              <button
-                onClick={() => setDropTargetType('note')}
-                className={`px-3 py-1.5 text-xs rounded-full border transition-colors ${
-                  dropTargetType === 'note'
-                    ? 'bg-indigo-600/20 text-indigo-200 border-indigo-500/50'
-                    : 'border-slate-700 text-slate-400 hover:text-slate-200 hover:border-slate-500'
-                }`}
-              >
-                Notas
-              </button>
-            </div>
-
-            <input
-              type="text"
-              value={dropTargetQuery}
-              onChange={(e) => setDropTargetQuery(e.target.value)}
-              placeholder={dropTargetType === 'todo' ? 'Buscar tarea...' : 'Buscar nota...'}
-              className="mt-3 w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
-            />
-
-            <div className="mt-3 max-h-56 overflow-y-auto space-y-1">
-              {dropTargetType === 'todo' ? (
-                filteredTodoDropTargets.length === 0 ? (
-                  <p className="text-xs text-slate-500 py-3 text-center">No hay tareas disponibles.</p>
-                ) : (
-                  filteredTodoDropTargets.map((todo) => {
-                    const selected = dropTargetId === todo.id;
-                    const attachmentCount = todo.attachments?.length || 0;
-                    const maxReached = attachmentCount >= MAX_ATTACHMENTS_PER_ENTITY;
-                    return (
-                      <button
-                        key={todo.id}
-                        onClick={() => setDropTargetId(todo.id)}
-                        className={`w-full text-left rounded-lg px-3 py-2 border ${
-                          selected
-                            ? 'border-indigo-500 bg-indigo-500/10 text-indigo-100'
-                            : 'border-slate-800 bg-slate-950/40 text-slate-300 hover:bg-slate-800/60'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="truncate text-sm">{todo.text}</span>
-                          <span className={`text-[10px] ${maxReached ? 'text-amber-400' : 'text-slate-500'}`}>
-                            {attachmentCount}/{MAX_ATTACHMENTS_PER_ENTITY}
-                          </span>
-                        </div>
-                      </button>
-                    );
-                  })
-                )
-              ) : (
-                filteredNoteDropTargets.length === 0 ? (
-                  <p className="text-xs text-slate-500 py-3 text-center">No hay notas disponibles.</p>
-                ) : (
-                  filteredNoteDropTargets.map((note) => {
-                    const selected = dropTargetId === note.id;
-                    const locked = !!note.locked;
-                    const attachmentCount = note.attachments?.length || 0;
-                    const maxReached = attachmentCount >= MAX_ATTACHMENTS_PER_ENTITY;
-                    return (
-                      <button
-                        key={note.id}
-                        onClick={() => !locked && setDropTargetId(note.id)}
-                        disabled={locked}
-                        className={`w-full text-left rounded-lg px-3 py-2 border ${
-                          selected
-                            ? 'border-indigo-500 bg-indigo-500/10 text-indigo-100'
-                            : 'border-slate-800 bg-slate-950/40 text-slate-300'
-                        } ${locked ? 'opacity-60 cursor-not-allowed' : 'hover:bg-slate-800/60'}`}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="truncate text-sm">{note.title || 'Untitled'}</span>
-                          <span className={`text-[10px] ${maxReached ? 'text-amber-400' : 'text-slate-500'}`}>
-                            {attachmentCount}/{MAX_ATTACHMENTS_PER_ENTITY}
-                          </span>
-                        </div>
-                        {locked && <p className="text-[10px] text-amber-400 mt-1">LOCK</p>}
-                      </button>
-                    );
-                  })
-                )
-              )}
-            </div>
-
-            <div className="mt-4 flex items-center justify-end gap-2">
-              <button
-                onClick={closeDropModal}
-                className="px-4 py-2 rounded-lg bg-slate-800 text-slate-200 hover:bg-slate-700"
-                disabled={dropProcessing}
-              >
-                Cancelar
-              </button>
-              <button
-                onClick={confirmDroppedAttachments}
-                disabled={
-                  dropProcessing ||
-                  !dropTargetId ||
-                  (dropTargetType === 'note' && !!selectedDropNote?.locked) ||
-                  (dropTargetType === 'todo' &&
-                    (selectedDropTodo?.attachments?.length || 0) + pendingDroppedFiles.length > MAX_ATTACHMENTS_PER_ENTITY) ||
-                  (dropTargetType === 'note' &&
-                    (selectedDropNote?.attachments?.length || 0) + pendingDroppedFiles.length > MAX_ATTACHMENTS_PER_ENTITY)
-                }
-                className="px-4 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {dropProcessing ? 'Guardando...' : 'Adjuntar'}
-              </button>
-            </div>
+            <p>Suelta para adjuntar archivos</p>
+            <p className="text-xs text-indigo-200/80 mt-1">
+              Destino automatico: {describeDropTarget(dragTargetPreview || lastAttachmentTargetRef.current || resolveDefaultDropTarget())}
+            </p>
           </div>
         </div>
       )}

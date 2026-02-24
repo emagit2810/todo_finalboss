@@ -20,6 +20,7 @@ interface NotesPanelProps {
   onUpdateTodo?: (todo: Todo) => void;
   onOpenAttachment?: (attachment: AttachmentMeta) => void;
   onDeleteNoteAttachment?: (noteId: string, attachmentId: string) => void;
+  activeDropNoteId?: string | null;
 }
 
 const PASSWORD_ITERATIONS = 100000;
@@ -61,6 +62,7 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
   onUpdateTodo,
   onOpenAttachment,
   onDeleteNoteAttachment,
+  activeDropNoteId = null,
 }) => {
   const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
@@ -250,6 +252,7 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
 
   const activeNote = activeNoteId ? notes.find((n) => n.id === activeNoteId) || null : null;
   const isNoteLocked = !!(activeNote?.locked && !unlockedNoteIds.includes(activeNote.id));
+  const isActiveDropNote = !!(activeNote && activeDropNoteId === activeNote.id);
 
   useEffect(() => {
     if (!activeNoteId || isNoteLocked) return;
@@ -795,6 +798,8 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
                           return (
                             <button
                               key={note.id}
+                              data-drop-scope="note"
+                              data-drop-id={note.id}
                               onClick={() => {
                                 if (folderLocked) return;
                                 setActiveFolderId(note.folderId ?? null);
@@ -860,6 +865,8 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
                                   return (
                                     <button
                                       key={note.id}
+                                      data-drop-scope="note"
+                                      data-drop-id={note.id}
                                       onClick={() => {
                                         if (locked) return;
                                         setActiveFolderId(node.id);
@@ -890,6 +897,8 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
                       return (
                         <button
                           key={note.id}
+                          data-drop-scope="note"
+                          data-drop-id={note.id}
                           onClick={() => {
                             setActiveFolderId(null);
                             setActiveNoteId(note.id);
@@ -1054,6 +1063,8 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
                 {filteredNotes.map((note) => (
                   <button
                     key={note.id}
+                    data-drop-scope="note"
+                    data-drop-id={note.id}
                     onClick={() => {
                       setActiveNoteId(note.id);
                     }}
@@ -1067,7 +1078,11 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
               </div>
             )}
 
-            <div className="flex-1 flex flex-col">
+            <div
+              className={`flex-1 flex flex-col ${isActiveDropNote ? 'ring-2 ring-indigo-400/70 rounded-lg p-2 -m-2' : ''}`}
+              data-drop-scope={activeNote ? 'note' : undefined}
+              data-drop-id={activeNote?.id || undefined}
+            >
               {!activeNote ? (
                 <NotePanelEmptyState />
               ) : (
