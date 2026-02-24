@@ -7,6 +7,14 @@ export interface Subtask {
   completed: boolean;
 }
 
+export interface AttachmentMeta {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  createdAt: number;
+}
+
 export interface Todo {
   id: string;
   text: string;
@@ -19,6 +27,7 @@ export interface Todo {
   subtasks?: Subtask[];
   dueDate?: number; // Timestamp
   linkedNotes?: string[];
+  attachments?: AttachmentMeta[];
 }
 
 export interface Medicine {
@@ -66,6 +75,7 @@ export interface NoteDoc {
   salt?: string;
   lockHash?: string;
   lockIterations?: number;
+  attachments?: AttachmentMeta[];
 }
 
 export type NotificationSource = 'todo' | 'reminder' | 'medicine' | 'expense';

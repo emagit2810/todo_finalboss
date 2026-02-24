@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { NoteDoc, NoteFolder, Todo, Priority } from '../types';
+import { NoteDoc, NoteFolder, Todo, Priority, AttachmentMeta } from '../types';
 import { DocumentIcon, FolderIcon, PlusIcon, TrashIcon, ChevronDownIcon, ChevronRightIcon, ArrowsCollapseIcon, ArrowsExpandIcon, XMarkIcon } from './Icons';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
@@ -18,6 +18,8 @@ interface NotesPanelProps {
   onConsumeOpenNoteId?: () => void;
   todos?: Todo[];
   onUpdateTodo?: (todo: Todo) => void;
+  onOpenAttachment?: (attachment: AttachmentMeta) => void;
+  onDeleteNoteAttachment?: (noteId: string, attachmentId: string) => void;
 }
 
 const PASSWORD_ITERATIONS = 100000;
@@ -57,6 +59,8 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
   onConsumeOpenNoteId,
   todos = [],
   onUpdateTodo,
+  onOpenAttachment,
+  onDeleteNoteAttachment,
 }) => {
   const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
@@ -1187,6 +1191,41 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
                             No hay tareas disponibles
                           </p>
                         )}
+                      </div>
+                    </div>
+                  )}
+                  {activeNote.attachments && activeNote.attachments.length > 0 && (
+                    <div className="mb-3 p-2 bg-slate-900/50 border border-slate-700 rounded-lg">
+                      <p className="text-[11px] uppercase tracking-wider text-slate-500 mb-2">
+                        Adjuntos
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {activeNote.attachments.map((attachment) => (
+                          <div
+                            key={attachment.id}
+                            className="flex items-center gap-1 bg-slate-700/50 rounded-lg px-2 py-1 text-xs text-slate-300 group"
+                          >
+                            <button
+                              onClick={() => onOpenAttachment?.(attachment)}
+                              className={`flex items-center gap-1 ${
+                                isNoteLocked ? 'text-slate-500 cursor-not-allowed' : 'hover:text-indigo-200'
+                              }`}
+                              title={isNoteLocked ? 'Desbloquea para abrir adjuntos' : attachment.name}
+                              disabled={isNoteLocked}
+                            >
+                              <DocumentIcon className="w-3 h-3 text-indigo-400" />
+                              <span className="max-w-[220px] truncate">{attachment.name}</span>
+                            </button>
+                            <button
+                              onClick={() => onDeleteNoteAttachment?.(activeNote.id, attachment.id)}
+                              className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-red-400 ml-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                              title={isNoteLocked ? 'Desbloquea para quitar adjuntos' : 'Quitar adjunto'}
+                              disabled={isNoteLocked}
+                            >
+                              <XMarkIcon className="w-3 h-3" />
+                            </button>
+                          </div>
+                        ))}
                       </div>
                     </div>
                   )}

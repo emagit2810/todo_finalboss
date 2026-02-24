@@ -26,6 +26,14 @@ interface TaskMasterDB extends DBSchema {
     key: string;
     value: NoteDoc;
   };
+  attachments: {
+    key: string;
+    value: {
+      id: string;
+      blob: Blob;
+      createdAt: number;
+    };
+  };
   notifications: {
     key: string;
     value: AppNotification;
@@ -37,7 +45,7 @@ interface TaskMasterDB extends DBSchema {
 }
 
 const DB_NAME = 'gemini-task-master';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 type StoreName = keyof TaskMasterDB;
 type StoreValue<K extends StoreName> = TaskMasterDB[K]['value'];
@@ -140,6 +148,9 @@ export const initDB = () => {
         }
         if (!db.objectStoreNames.contains('notes')) {
           db.createObjectStore('notes', { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains('attachments')) {
+          db.createObjectStore('attachments', { keyPath: 'id' });
         }
         if (!db.objectStoreNames.contains('notifications')) {
           db.createObjectStore('notifications', { keyPath: 'id' });
@@ -255,4 +266,35 @@ export const saveAIResult = async (query: string, resultText: string) => {
         warnFallbackOnce(error);
         fallbackPutItem('ai_planner_results', payload);
     }
-}
+};
+
+const ATTACHMENT_DB_UNAVAILABLE = 'IndexedDB no disponible para guardar adjuntos.';
+
+export const putAttachmentBlob = async (id: string, blob: Blob) => {
+  const db = await initDB();
+  if (!db) {
+    throw new Error(ATTACHMENT_DB_UNAVAILABLE);
+  }
+  await db.put('attachments', {
+    id,
+    blob,
+    createdAt: Date.now(),
+  });
+};
+
+export const getAttachmentBlob = async (id: string): Promise<Blob | null> => {
+  const db = await initDB();
+  if (!db) {
+    throw new Error(ATTACHMENT_DB_UNAVAILABLE);
+  }
+  const record = await db.get('attachments', id);
+  return record?.blob || null;
+};
+
+export const deleteAttachmentBlob = async (id: string) => {
+  const db = await initDB();
+  if (!db) {
+    throw new Error(ATTACHMENT_DB_UNAVAILABLE);
+  }
+  await db.delete('attachments', id);
+};

@@ -1,6 +1,6 @@
 
 import React, { useState } from 'react';
-import { Todo, Priority, Subtask, NoteDoc, NoteFolder } from '../types';
+import { Todo, Priority, Subtask, NoteDoc, NoteFolder, AttachmentMeta } from '../types';
 import { CheckIcon, TrashIcon, SpeakerIcon, FlagIcon, ChevronUpIcon, ChevronDownIcon, PlusIcon, XMarkIcon, ClockIcon, DocumentIcon } from './Icons';
 import { speakText } from '../services/geminiService';
 
@@ -11,15 +11,27 @@ interface TodoItemProps {
   notes?: NoteDoc[];
   noteFolders?: NoteFolder[];
   onOpenNote?: (noteId: string) => void;
+  onOpenAttachment?: (attachment: AttachmentMeta) => void;
+  onDeleteAttachment?: (todoId: string, attachmentId: string) => void;
 }
 
-export const TodoItem: React.FC<TodoItemProps> = ({ todo, onUpdate, onDelete, notes = [], noteFolders = [], onOpenNote }) => {
+export const TodoItem: React.FC<TodoItemProps> = ({
+  todo,
+  onUpdate,
+  onDelete,
+  notes = [],
+  noteFolders = [],
+  onOpenNote,
+  onOpenAttachment,
+  onDeleteAttachment,
+}) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [newSubtask, setNewSubtask] = useState('');
   const [isLinkPickerOpen, setIsLinkPickerOpen] = useState(false);
   const [linkQuery, setLinkQuery] = useState('');
 
   const linkedNoteIds = todo.linkedNotes || [];
+  const attachments = todo.attachments || [];
   const linkedNotes = linkedNoteIds
     .map((id) => notes.find((n) => n.id === id) || null)
     .filter((n): n is NoteDoc => !!n);
@@ -347,6 +359,33 @@ export const TodoItem: React.FC<TodoItemProps> = ({ todo, onUpdate, onDelete, no
                   </button>
                 ))}
             </div>
+          </div>
+        )}
+
+        {attachments.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {attachments.map((attachment) => (
+              <div
+                key={attachment.id}
+                className="flex items-center gap-1 bg-slate-700/40 hover:bg-slate-700 rounded-lg px-2 py-1 text-xs text-slate-300 group"
+              >
+                <button
+                  onClick={() => onOpenAttachment?.(attachment)}
+                  className="flex items-center gap-1 hover:text-indigo-200"
+                  title={attachment.name}
+                >
+                  <DocumentIcon className="w-3 h-3 text-indigo-400" />
+                  <span className="max-w-[180px] truncate">{attachment.name}</span>
+                </button>
+                <button
+                  onClick={() => onDeleteAttachment?.(todo.id, attachment.id)}
+                  className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-red-400 ml-1"
+                  title="Quitar adjunto"
+                >
+                  <XMarkIcon className="w-3 h-3" />
+                </button>
+              </div>
+            ))}
           </div>
         )}
       </div>
