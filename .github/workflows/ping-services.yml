@@ -1,0 +1,38 @@
+name: Ping External Services
+
+on:
+  schedule:
+    # Ejecutar cada 30 minutos (formato cron: minuto hora día-mes mes día-semana)
+    - cron: '*/30 * * * *'
+  workflow_dispatch: # Permite ejecutar manualmente
+
+jobs:
+  ping-services:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Ping Fast API Service
+      run: |
+        echo "Pinging Fast API service..."
+        response=$(curl -s -o /dev/null -w "%{http_code}" https://fast-api-v.onrender.com/healthz)
+        if [ $response -eq 200 ]; then
+          echo "✅ Fast API service responded with $response"
+        else
+          echo "❌ Fast API service responded with $response"
+        fi
+        
+    - name: Ping N8N Service
+      run: |
+        echo "Pinging N8N service..."
+        response=$(curl -s -o /dev/null -w "%{http_code}" https://n8n-service-ea3k.onrender.com/healthz)
+        if [ $response -eq 200 ]; then
+          echo "✅ N8N service responded with $response"
+        else
+          echo "❌ N8N service responded with $response"
+        fi
+        
+    - name: Log Results
+      run: |
+        echo "Services pinged at $(date)"
+        echo "Fast API: https://fast-api-v.onrender.com/healthz"
+        echo "N8N Service: https://n8n-service-ea3k.onrender.com/healthz"
