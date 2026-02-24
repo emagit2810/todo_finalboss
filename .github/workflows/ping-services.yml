@@ -2,10 +2,8 @@ name: Ping External Services
 
 on:
   schedule:
-    # Ejecutar cada hora en horas pares (cada 2 horas) - alternativa más segura
-    - cron: '0 */2 * * *'
-    # Ejecutar cada hora en horas impares (cada 2 horas desfasado)
-    - cron: '30 1,3,5,7,9,11,13,15,17,19,21,23 * * *'
+    # Ejecutar cada 3 horas para mantener margen de seguridad en Render
+    - cron: '0 */3 * * *'
   workflow_dispatch: # Permite ejecutar manualmente
 
 jobs:
