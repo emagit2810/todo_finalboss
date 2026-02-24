@@ -11,6 +11,7 @@ import { NotesPanel } from './components/NotesPanel';
 import { Sidebar } from './components/Sidebar';
 import * as db from './services/db';
 import { sendReminder, sendDailyTopNow, tryOpenWhatsAppLink, syncDailyTopSnapshot, type DailyTopTaskSnapshot } from './services/reminderService';
+import { wakeServices, type WakeBatchResult, type WakeTrigger } from './services/serviceWakeService';
 import { Toast } from './components/Toast';
 import { VoiceDictation } from './components/VoiceDictation';
 import { buildMedicineAlerts } from './utils/medicineAlerts';
@@ -38,6 +39,11 @@ const DAILY_TOP_SYNC_DEBOUNCE_MS = 1200;
 const DAILY_TOP_RETRY_COOLDOWN_MS = 15 * 60 * 1000;
 const MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024;
 const MAX_ATTACHMENTS_PER_ENTITY = 5;
+const SERVICE_WAKE_AUTO_STORAGE_KEY = 'service_wake_auto_enabled';
+const SERVICE_WAKE_LAST_ATTEMPT_STORAGE_KEY = 'service_wake_last_attempt_at';
+const DEFAULT_SERVICE_WAKE_INTERVAL_MS = 2 * MS_HOUR;
+const WAKE_HISTORY_LIMIT = 20;
+const AUTO_WAKE_TICK_MS = 60 * 1000;
 const ALLOWED_ATTACHMENT_EXTENSIONS = new Set(['pdf', 'txt', 'doc', 'docx']);
 const ALLOWED_ATTACHMENT_MIME_TYPES = new Set([
   'application/pdf',
@@ -46,6 +52,16 @@ const ALLOWED_ATTACHMENT_MIME_TYPES = new Set([
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'application/octet-stream',
 ]);
+
+const parseServiceWakeIntervalMs = () => {
+  const raw = (import.meta as any)?.env?.VITE_SERVICE_WAKE_INTERVAL_MS;
+  if (!raw) return DEFAULT_SERVICE_WAKE_INTERVAL_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_SERVICE_WAKE_INTERVAL_MS;
+  return Math.round(parsed);
+};
+
+const SERVICE_WAKE_INTERVAL_MS = parseServiceWakeIntervalMs();
 
 const DAILY_TOP_DATE_FMT = new Intl.DateTimeFormat('en-CA', {
   timeZone: DAILY_TOP_TZ,
@@ -215,6 +231,20 @@ function App() {
   const [notificationFilter, setNotificationFilter] = useState<NotificationFilter>('today');
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [notificationsReady, setNotificationsReady] = useState(false);
+  const [isServicePanelOpen, setIsServicePanelOpen] = useState(false);
+  const [wakeInFlight, setWakeInFlight] = useState(false);
+  const wakeInFlightRef = useRef(false);
+  const [wakeHistory, setWakeHistory] = useState<WakeBatchResult[]>([]);
+  const [nextAutoWakeAt, setNextAutoWakeAt] = useState<number | null>(null);
+  const [autoWakeEnabled, setAutoWakeEnabled] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return window.localStorage.getItem(SERVICE_WAKE_AUTO_STORAGE_KEY) === '1';
+    } catch (_error) {
+      return false;
+    }
+  });
+  const lastWakeAttemptAtRef = useRef(0);
   const [nowTs, setNowTs] = useState(Date.now());
   const notificationWindowStartTs = useMemo(() => getDayStartTs(nowTs), [nowTs]);
   const dailyTop5 = useMemo(() => buildDailyTop5Snapshot(todos, nowTs), [todos, nowTs]);
@@ -442,6 +472,70 @@ function App() {
     });
   };
 
+  const readLastWakeAttemptAt = useCallback(() => {
+    if (typeof window === 'undefined') return 0;
+    try {
+      const raw = window.localStorage.getItem(SERVICE_WAKE_LAST_ATTEMPT_STORAGE_KEY);
+      const parsed = raw ? Number(raw) : 0;
+      const normalized = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+      lastWakeAttemptAtRef.current = normalized;
+      return normalized;
+    } catch (_error) {
+      return 0;
+    }
+  }, []);
+
+  const persistLastWakeAttemptAt = useCallback((attemptedAt: number) => {
+    lastWakeAttemptAtRef.current = attemptedAt;
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(SERVICE_WAKE_LAST_ATTEMPT_STORAGE_KEY, String(attemptedAt));
+    } catch (_error) {
+      // Ignore write errors from restricted environments.
+    }
+  }, []);
+
+  const handleWakeServices = useCallback(async (trigger: WakeTrigger) => {
+    if (wakeInFlightRef.current) return;
+
+    if (trigger === 'auto') {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      const sharedLastAttempt = readLastWakeAttemptAt();
+      const now = Date.now();
+      if (sharedLastAttempt > 0 && now - sharedLastAttempt < SERVICE_WAKE_INTERVAL_MS) {
+        setNextAutoWakeAt(sharedLastAttempt + SERVICE_WAKE_INTERVAL_MS);
+        return;
+      }
+    }
+
+    wakeInFlightRef.current = true;
+    setWakeInFlight(true);
+    const lockAttemptAt = Date.now();
+    persistLastWakeAttemptAt(lockAttemptAt);
+    setNextAutoWakeAt(lockAttemptAt + SERVICE_WAKE_INTERVAL_MS);
+
+    try {
+      const batch = await wakeServices(trigger);
+      setWakeHistory(prev => [batch, ...prev].slice(0, WAKE_HISTORY_LIMIT));
+
+      const failures = batch.results.filter(item => item.status === 'error');
+      if (failures.length > 0) {
+        const message =
+          failures.length === batch.results.length
+            ? 'Error al despertar servicios'
+            : 'Ping parcial: algunos servicios fallaron';
+        setNotification({ message, type: 'error' });
+      } else if (trigger === 'manual') {
+        setNotification({ message: 'Ping enviado a Fast API y N8N', type: 'success' });
+      }
+    } catch (error: any) {
+      setNotification({ message: error?.message || 'Error en despertar servicio', type: 'error' });
+    } finally {
+      wakeInFlightRef.current = false;
+      setWakeInFlight(false);
+    }
+  }, [persistLastWakeAttemptAt, readLastWakeAttemptAt]);
+
   const createLocalNotification = useCallback(async (message: string, scheduledAt: number) => {
     const newItem: AppNotification = {
       id: crypto.randomUUID(),
@@ -464,6 +558,87 @@ function App() {
   const updateReminderOption = (key: keyof ReminderOptions, checked: boolean) => {
     setReminderOptions(prev => ({ ...prev, [key]: checked }));
   };
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(SERVICE_WAKE_AUTO_STORAGE_KEY, autoWakeEnabled ? '1' : '0');
+    } catch (_error) {
+      // Ignore persistence errors from restricted environments.
+    }
+  }, [autoWakeEnabled]);
+
+  useEffect(() => {
+    const sharedLastAttempt = readLastWakeAttemptAt();
+    if (!autoWakeEnabled) {
+      setNextAutoWakeAt(null);
+      return;
+    }
+    let baseTs = sharedLastAttempt;
+    if (baseTs <= 0) {
+      baseTs = Date.now();
+      persistLastWakeAttemptAt(baseTs);
+    }
+    setNextAutoWakeAt(baseTs + SERVICE_WAKE_INTERVAL_MS);
+  }, [autoWakeEnabled, persistLastWakeAttemptAt, readLastWakeAttemptAt]);
+
+  useEffect(() => {
+    if (!autoWakeEnabled) return;
+
+    const evaluateAutoWake = () => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      const now = Date.now();
+      const sharedLastAttempt = readLastWakeAttemptAt();
+      if (sharedLastAttempt <= 0) {
+        persistLastWakeAttemptAt(now);
+        setNextAutoWakeAt(now + SERVICE_WAKE_INTERVAL_MS);
+        return;
+      }
+      const dueAt = sharedLastAttempt + SERVICE_WAKE_INTERVAL_MS;
+      setNextAutoWakeAt(dueAt);
+      if (now >= dueAt) {
+        void handleWakeServices('auto');
+      }
+    };
+
+    evaluateAutoWake();
+    const intervalId = window.setInterval(evaluateAutoWake, AUTO_WAKE_TICK_MS);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        evaluateAutoWake();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [autoWakeEnabled, handleWakeServices, persistLastWakeAttemptAt, readLastWakeAttemptAt]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === SERVICE_WAKE_AUTO_STORAGE_KEY && event.newValue !== null) {
+        setAutoWakeEnabled(event.newValue === '1');
+        return;
+      }
+      if (event.key === SERVICE_WAKE_LAST_ATTEMPT_STORAGE_KEY) {
+        const sharedLastAttempt = readLastWakeAttemptAt();
+        if (autoWakeEnabled) {
+          const dueAt =
+            sharedLastAttempt > 0
+              ? sharedLastAttempt + SERVICE_WAKE_INTERVAL_MS
+              : Date.now() + SERVICE_WAKE_INTERVAL_MS;
+          setNextAutoWakeAt(dueAt);
+        }
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+    };
+  }, [autoWakeEnabled, readLastWakeAttemptAt]);
 
   useEffect(() => {
     if (!notificationsReady) return;
@@ -1684,6 +1859,21 @@ function App() {
   const formatSchedule = (timestamp: number) =>
     new Date(timestamp).toLocaleString('es-CO', { dateStyle: 'medium', timeStyle: 'short' });
 
+  const formatWakeAttempt = (timestamp: number) =>
+    new Date(timestamp).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' });
+
+  const nextAutoWakeLabel = useMemo(() => {
+    if (!nextAutoWakeAt || !autoWakeEnabled) return 'Auto-ping apagado';
+    const diffMs = nextAutoWakeAt - nowTs;
+    if (diffMs <= 0) return 'Pendiente de ejecucion';
+    const minutes = Math.ceil(diffMs / MS_MINUTE);
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+    if (hours === 0) return `En ${remainingMinutes}m`;
+    if (remainingMinutes === 0) return `En ${hours}h`;
+    return `En ${hours}h ${remainingMinutes}m`;
+  }, [autoWakeEnabled, nextAutoWakeAt, nowTs]);
+
   const filteredNotifications = useMemo(() => {
     return notifications
       .filter(item => {
@@ -1730,83 +1920,184 @@ function App() {
         />
       )}
 
-      {/* Notification Center (top-right) */}
-      <div className="fixed top-4 right-4 z-[70]">
-        <button
-          onClick={toggleNotificationCenter}
-          className="relative p-2 rounded-full bg-slate-900/80 border border-slate-800 hover:bg-slate-800 transition-colors"
-          title="Notifications"
-        >
-          <BellIcon className="w-5 h-5 text-slate-200" />
-          {weeklyUnreadCount > 0 && (
-            <span className="absolute -top-1 -right-1 bg-rose-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">
-              {weeklyUnreadCount}
-            </span>
-          )}
-        </button>
+      {/* Top-right controls */}
+      <div className="fixed top-4 right-4 z-[70] flex items-start gap-2">
+        <div className="relative">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => void handleWakeServices('manual')}
+              disabled={wakeInFlight}
+              className="px-3 py-2 rounded-lg bg-emerald-700 text-white hover:bg-emerald-600 disabled:opacity-60 disabled:cursor-not-allowed text-xs sm:text-sm"
+              title="Enviar ping a Fast API y N8N"
+            >
+              {wakeInFlight ? 'Despertando...' : 'Despertar servicio'}
+            </button>
+            <button
+              onClick={() => setIsServicePanelOpen(prev => !prev)}
+              className="px-2 py-2 rounded-lg bg-slate-900/80 border border-slate-800 text-slate-200 hover:bg-slate-800 text-xs"
+              title="Abrir panel de servicio"
+            >
+              {isServicePanelOpen ? 'Ocultar' : 'Detalle'}
+            </button>
+          </div>
 
-        {notificationCenterOpen && (
-          <div className="mt-2 w-80 max-h-96 overflow-y-auto rounded-xl border border-slate-800 bg-slate-900/95 shadow-2xl p-3">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-xs uppercase tracking-wider text-slate-400">Notificaciones</p>
-              <button
-                onClick={() => setNotificationCenterOpen(false)}
-                className="text-slate-500 hover:text-white text-xs"
-              >
-                Cerrar
-              </button>
-            </div>
-
-            <div className="flex items-center gap-2 mb-3">
-              {([
-                { id: 'today', label: 'Hoy' },
-                { id: 'tomorrow', label: 'Manana' },
-                { id: 'week', label: '7 dias' },
-              ] as Array<{ id: NotificationFilter; label: string }>).map((tab) => (
+          {isServicePanelOpen && (
+            <div className="mt-2 w-[min(92vw,28rem)] rounded-xl border border-slate-800 bg-slate-900/95 shadow-2xl p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs uppercase tracking-wider text-slate-400">Service Wake</p>
+                  <p className="text-sm text-slate-200">Fast API + N8N</p>
+                </div>
                 <button
-                  key={tab.id}
-                  onClick={() => setNotificationFilter(tab.id)}
-                  className={`px-2 py-1 rounded-full text-[11px] border transition-colors ${
-                    notificationFilter === tab.id
-                      ? 'bg-indigo-500/20 text-indigo-200 border-indigo-500/40'
-                      : 'border-slate-700 text-slate-400 hover:text-slate-200 hover:border-slate-500'
-                  }`}
+                  onClick={() => setIsServicePanelOpen(false)}
+                  className="text-xs text-slate-500 hover:text-white"
                 >
-                  {tab.label}
+                  Cerrar
                 </button>
-              ))}
-            </div>
+              </div>
 
-            {filteredNotifications.length === 0 && (
-              <p className="text-sm text-slate-500">Sin notificaciones para esta vista.</p>
-            )}
+              <label className="mt-3 flex items-center gap-2 text-xs text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={autoWakeEnabled}
+                  onChange={(e) => setAutoWakeEnabled(e.target.checked)}
+                />
+                <span>
+                  Auto-ping cada {Math.max(1, Math.round(SERVICE_WAKE_INTERVAL_MS / MS_HOUR))}h (solo visible)
+                </span>
+              </label>
 
-            {filteredNotifications.map(item => (
-              <div
-                key={item.id}
-                className={`border border-slate-800 rounded-lg p-2 mb-2 last:mb-0 bg-slate-950/40 ${
-                  item.read ? 'opacity-60' : ''
-                }`}
-              >
-                <label className="flex items-start gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={item.read}
-                    onChange={() => toggleNotificationRead(item)}
-                    className="mt-1"
-                  />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-slate-200 break-words">{item.message}</p>
-                    <div className="flex items-center gap-2 text-[10px] text-slate-500 mt-1">
-                      <span className="uppercase tracking-wide">{getNotificationSourceLabel(item.source)}</span>
-                      <span>{formatSchedule(item.scheduledAt)}</span>
+              <div className="mt-2 text-xs text-slate-400">
+                <p>
+                  Siguiente intento: <span className="text-slate-200">{nextAutoWakeLabel}</span>
+                </p>
+                {nextAutoWakeAt && autoWakeEnabled && (
+                  <p className="text-[11px] text-slate-500">{formatWakeAttempt(nextAutoWakeAt)}</p>
+                )}
+              </div>
+
+              <p className="mt-2 text-[10px] text-slate-500">
+                Modo no-cors: "enviado" confirma dispatch, no estado HTTP de healthz.
+              </p>
+
+              <div className="mt-3 max-h-56 overflow-y-auto space-y-2">
+                {wakeHistory.length === 0 && (
+                  <p className="text-xs text-slate-500">Sin intentos todavia.</p>
+                )}
+                {wakeHistory.map((entry, idx) => (
+                  <div
+                    key={`${entry.attemptedAt}-${entry.trigger}-${idx}`}
+                    className="rounded-lg border border-slate-800 bg-slate-950/40 p-2"
+                  >
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span
+                        className={`uppercase tracking-wide ${
+                          entry.trigger === 'manual' ? 'text-emerald-300' : 'text-indigo-300'
+                        }`}
+                      >
+                        {entry.trigger}
+                      </span>
+                      <span className="text-slate-500">{formatWakeAttempt(entry.attemptedAt)}</span>
+                    </div>
+                    <div className="mt-2 space-y-1">
+                      {entry.results.map((result) => (
+                        <div
+                          key={`${entry.attemptedAt}-${result.serviceId}`}
+                          className="flex items-center justify-between gap-2 text-xs"
+                        >
+                          <span className="text-slate-300">{result.serviceLabel}</span>
+                          <span className={result.status === 'sent' ? 'text-emerald-300' : 'text-rose-300'}>
+                            {result.status === 'sent'
+                              ? `enviado (${result.durationMs}ms)`
+                              : `error (${result.error || 'network_error'})`}
+                          </span>
+                        </div>
+                      ))}
                     </div>
                   </div>
-                </label>
+                ))}
               </div>
-            ))}
-          </div>
-        )}
+            </div>
+          )}
+        </div>
+
+        <div className="relative">
+          <button
+            onClick={toggleNotificationCenter}
+            className="relative p-2 rounded-full bg-slate-900/80 border border-slate-800 hover:bg-slate-800 transition-colors"
+            title="Notifications"
+          >
+            <BellIcon className="w-5 h-5 text-slate-200" />
+            {weeklyUnreadCount > 0 && (
+              <span className="absolute -top-1 -right-1 bg-rose-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">
+                {weeklyUnreadCount}
+              </span>
+            )}
+          </button>
+
+          {notificationCenterOpen && (
+            <div className="mt-2 w-80 max-h-96 overflow-y-auto rounded-xl border border-slate-800 bg-slate-900/95 shadow-2xl p-3">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs uppercase tracking-wider text-slate-400">Notificaciones</p>
+                <button
+                  onClick={() => setNotificationCenterOpen(false)}
+                  className="text-slate-500 hover:text-white text-xs"
+                >
+                  Cerrar
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2 mb-3">
+                {([
+                  { id: 'today', label: 'Hoy' },
+                  { id: 'tomorrow', label: 'Manana' },
+                  { id: 'week', label: '7 dias' },
+                ] as Array<{ id: NotificationFilter; label: string }>).map((tab) => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setNotificationFilter(tab.id)}
+                    className={`px-2 py-1 rounded-full text-[11px] border transition-colors ${
+                      notificationFilter === tab.id
+                        ? 'bg-indigo-500/20 text-indigo-200 border-indigo-500/40'
+                        : 'border-slate-700 text-slate-400 hover:text-slate-200 hover:border-slate-500'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+
+              {filteredNotifications.length === 0 && (
+                <p className="text-sm text-slate-500">Sin notificaciones para esta vista.</p>
+              )}
+
+              {filteredNotifications.map(item => (
+                <div
+                  key={item.id}
+                  className={`border border-slate-800 rounded-lg p-2 mb-2 last:mb-0 bg-slate-950/40 ${
+                    item.read ? 'opacity-60' : ''
+                  }`}
+                >
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={item.read}
+                      onChange={() => toggleNotificationRead(item)}
+                      className="mt-1"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-slate-200 break-words">{item.message}</p>
+                      <div className="flex items-center gap-2 text-[10px] text-slate-500 mt-1">
+                        <span className="uppercase tracking-wide">{getNotificationSourceLabel(item.source)}</span>
+                        <span>{formatSchedule(item.scheduledAt)}</span>
+                      </div>
+                    </div>
+                  </label>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Sidebar Navigation */}
@@ -2027,3 +2318,4 @@ function App() {
 }
 
 export default App;
+

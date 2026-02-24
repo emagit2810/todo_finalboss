@@ -2,7 +2,9 @@
 
 interface ImportMetaEnv {
   readonly VITE_GEMINI_API_KEY: string;
-  // Add other environment variables here as needed
+  readonly VITE_FASTAPI_HEALTH_URL?: string;
+  readonly VITE_N8N_HEALTH_URL?: string;
+  readonly VITE_SERVICE_WAKE_INTERVAL_MS?: string;
 }
 
 interface ImportMeta {
