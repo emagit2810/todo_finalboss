@@ -17,6 +17,7 @@ import { VoiceDictation } from './components/VoiceDictation';
 import { buildMedicineAlerts } from './utils/medicineAlerts';
 
 type NotificationFilter = 'today' | 'tomorrow' | 'week';
+type DismissedNotificationsMap = Record<string, number>;
 type DropTarget =
   | { type: 'todo'; id: string }
   | { type: 'note'; id: string }
@@ -44,6 +45,7 @@ const SERVICE_WAKE_LAST_ATTEMPT_STORAGE_KEY = 'service_wake_last_attempt_at';
 const DEFAULT_SERVICE_WAKE_INTERVAL_MS = 2 * MS_HOUR;
 const WAKE_HISTORY_LIMIT = 20;
 const AUTO_WAKE_TICK_MS = 60 * 1000;
+const DISMISSED_NOTIFICATIONS_STORAGE_KEY = 'dismissed_notifications';
 const ALLOWED_ATTACHMENT_EXTENSIONS = new Set(['pdf', 'txt', 'doc', 'docx']);
 const ALLOWED_ATTACHMENT_MIME_TYPES = new Set([
   'application/pdf',
@@ -231,6 +233,24 @@ function App() {
   const [notificationFilter, setNotificationFilter] = useState<NotificationFilter>('today');
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [notificationsReady, setNotificationsReady] = useState(false);
+  const [dismissedNotifications, setDismissedNotifications] = useState<DismissedNotificationsMap>(() => {
+    if (typeof window === 'undefined') return {};
+    try {
+      const raw = window.localStorage.getItem(DISMISSED_NOTIFICATIONS_STORAGE_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return {};
+      const next: DismissedNotificationsMap = {};
+      Object.entries(parsed as Record<string, unknown>).forEach(([id, scheduledAt]) => {
+        if (typeof scheduledAt === 'number' && Number.isFinite(scheduledAt)) {
+          next[id] = scheduledAt;
+        }
+      });
+      return next;
+    } catch (_error) {
+      return {};
+    }
+  });
   const [isServicePanelOpen, setIsServicePanelOpen] = useState(false);
   const [wakeInFlight, setWakeInFlight] = useState(false);
   const wakeInFlightRef = useRef(false);
@@ -462,15 +482,36 @@ function App() {
     setReminderEdited(false);
   }, []);
 
-  const toggleNotificationCenter = () => {
-    setNotificationCenterOpen((prev) => {
-      const next = !prev;
-      if (next) {
-        setNotificationFilter('today');
+  const closeNotificationCenter = useCallback(() => {
+    const toDelete = notifications.filter(item => item.read);
+    if (toDelete.length > 0) {
+      const toDeleteIds = new Set(toDelete.map(item => item.id));
+      const dismissedGenerated: DismissedNotificationsMap = {};
+
+      setNotifications(prev => prev.filter(item => !toDeleteIds.has(item.id)));
+      toDelete.forEach(item => {
+        void db.deleteItem('notifications', item.id);
+        if (item.source !== 'reminder') {
+          dismissedGenerated[item.id] = item.scheduledAt;
+        }
+      });
+
+      if (Object.keys(dismissedGenerated).length > 0) {
+        setDismissedNotifications(prev => ({ ...prev, ...dismissedGenerated }));
       }
-      return next;
-    });
-  };
+    }
+
+    setNotificationCenterOpen(false);
+  }, [notifications]);
+
+  const toggleNotificationCenter = useCallback(() => {
+    if (notificationCenterOpen) {
+      closeNotificationCenter();
+      return;
+    }
+    setNotificationFilter('today');
+    setNotificationCenterOpen(true);
+  }, [closeNotificationCenter, notificationCenterOpen]);
 
   const readLastWakeAttemptAt = useCallback(() => {
     if (typeof window === 'undefined') return 0;
@@ -567,6 +608,22 @@ function App() {
       // Ignore persistence errors from restricted environments.
     }
   }, [autoWakeEnabled]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      if (Object.keys(dismissedNotifications).length === 0) {
+        window.localStorage.removeItem(DISMISSED_NOTIFICATIONS_STORAGE_KEY);
+        return;
+      }
+      window.localStorage.setItem(
+        DISMISSED_NOTIFICATIONS_STORAGE_KEY,
+        JSON.stringify(dismissedNotifications)
+      );
+    } catch (_error) {
+      // Ignore persistence errors from restricted environments.
+    }
+  }, [dismissedNotifications]);
 
   useEffect(() => {
     const sharedLastAttempt = readLastWakeAttemptAt();
@@ -710,6 +767,7 @@ function App() {
           entityId: todo.id,
           read: false,
         };
+        if (dismissedNotifications[base.id] === base.scheduledAt) return;
         upsertGenerated(base);
       });
 
@@ -730,6 +788,7 @@ function App() {
           read: false,
           entityId: alert.medicineId,
         };
+        if (dismissedNotifications[base.id] === base.scheduledAt) return;
         upsertGenerated(base);
       });
 
@@ -750,6 +809,7 @@ function App() {
             read: false,
             entityId: expense.id,
           };
+          if (dismissedNotifications[base.id] === base.scheduledAt) return;
           upsertGenerated(base);
         });
       });
@@ -781,7 +841,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [expenses, medicines, notificationWindowStartTs, notifications, notificationsReady, todos]);
+  }, [dismissedNotifications, expenses, medicines, notificationWindowStartTs, notifications, notificationsReady, todos]);
 
   useEffect(() => {
     if (!isReminderPanelOpen) return;
@@ -1908,6 +1968,24 @@ function App() {
     });
   }, [notifications, nowTs, notificationsReady]);
 
+  useEffect(() => {
+    const todayStart = getDayStartTs(nowTs);
+    setDismissedNotifications(prev => {
+      const entries = Object.entries(prev);
+      if (entries.length === 0) return prev;
+      let changed = false;
+      const next: DismissedNotificationsMap = {};
+      entries.forEach(([id, scheduledAt]) => {
+        if (scheduledAt >= todayStart) {
+          next[id] = scheduledAt;
+          return;
+        }
+        changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [nowTs]);
+
   return (
     <div className="flex h-screen bg-slate-950 text-slate-100 font-sans selection:bg-primary-500/30 overflow-hidden relative">
       {/* Toast Notification Layer */}
@@ -2040,7 +2118,7 @@ function App() {
               <div className="flex items-center justify-between mb-2">
                 <p className="text-xs uppercase tracking-wider text-slate-400">Notificaciones</p>
                 <button
-                  onClick={() => setNotificationCenterOpen(false)}
+                  onClick={closeNotificationCenter}
                   className="text-slate-500 hover:text-white text-xs"
                 >
                   Cerrar
