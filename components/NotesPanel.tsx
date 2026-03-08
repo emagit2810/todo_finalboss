@@ -1,9 +1,19 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { NoteDoc, NoteFolder, Todo, Priority, AttachmentMeta } from '../types';
+import { NoteContentFormat, NoteDoc, NoteFolder, Todo, Priority, AttachmentMeta, PdfExportMode } from '../types';
 import { DocumentIcon, FolderIcon, PlusIcon, TrashIcon, ChevronDownIcon, ChevronRightIcon, ArrowsCollapseIcon, ArrowsExpandIcon, XMarkIcon } from './Icons';
-import jsPDF from 'jspdf';
-import html2canvas from 'html2canvas';
+import { useReactToPrint } from 'react-to-print';
+import { NotePrintDocument, NOTE_PRINT_PAGE_STYLE } from './notes/NotePrintDocument';
+import { PrintableNotePayload, exportNotePdf, isExternalPdfExporterConfigured } from '../exporters/notePdf';
 import { deriveKeyAndHash, decryptWithKey, encryptWithKey, generateSalt } from '../utils/crypto';
+import {
+  DEFAULT_NEW_NOTE_CONTENT_FORMAT,
+  NOTE_CONTENT_FORMAT_LABELS,
+  NOTE_EXPORT_MODE_STORAGE_KEY,
+  PDF_EXPORT_MODE_LABELS,
+  buildNotePdfFileName,
+  normalizeNoteContentFormat,
+  parsePdfExportMode,
+} from '../utils/noteContent';
 
 interface NotesPanelProps {
   notes: NoteDoc[];
@@ -21,9 +31,11 @@ interface NotesPanelProps {
   onOpenAttachment?: (attachment: AttachmentMeta) => void;
   onDeleteNoteAttachment?: (noteId: string, attachmentId: string) => void;
   activeDropNoteId?: string | null;
+  onNotify?: (message: string, type: 'success' | 'error') => void;
 }
 
 const PASSWORD_ITERATIONS = 100000;
+const NOTE_PRINT_LOCALE = 'es-CO';
 const PRESET_TAGS = [
   'prompt estudio',
   'prompt problema',
@@ -63,6 +75,7 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
   onOpenAttachment,
   onDeleteNoteAttachment,
   activeDropNoteId = null,
+  onNotify,
 }) => {
   const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
@@ -78,6 +91,7 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
 
   const [draftTitle, setDraftTitle] = useState('');
   const [draftContent, setDraftContent] = useState('');
+  const [draftContentFormat, setDraftContentFormat] = useState<NoteContentFormat>('plain');
   const [draftTags, setDraftTags] = useState('');
 
   const [noteLockPassword, setNoteLockPassword] = useState('');
@@ -87,6 +101,16 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
   const [folderPassword, setFolderPassword] = useState('');
   const [localError, setLocalError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
+  const [exportingMode, setExportingMode] = useState<PdfExportMode | null>(null);
+  const [preferredExportMode, setPreferredExportMode] = useState<PdfExportMode | null>(() => {
+    if (typeof window === 'undefined') return null;
+    try {
+      return parsePdfExportMode(window.localStorage.getItem(NOTE_EXPORT_MODE_STORAGE_KEY));
+    } catch (_error) {
+      return null;
+    }
+  });
   
   // States for task linking
   const [isTaskLinkerOpen, setIsTaskLinkerOpen] = useState(false);
@@ -98,8 +122,17 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
 
   const noteKeysRef = useRef<Map<string, CryptoKey>>(new Map());
   const editorTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const printDocumentRef = useRef<HTMLDivElement | null>(null);
+  const exportMenuRef = useRef<HTMLDivElement | null>(null);
   const [unlockedNoteIds, setUnlockedNoteIds] = useState<string[]>([]);
   const [unlockedFolderIds, setUnlockedFolderIds] = useState<string[]>([]);
+
+  const externalExporterConfigured = isExternalPdfExporterConfigured();
+  const resolvedPreferredExportMode =
+    preferredExportMode === 'external-chromium' && !externalExporterConfigured
+      ? null
+      : preferredExportMode;
+  const primaryExportMode = resolvedPreferredExportMode || 'offline-browser';
 
   const folderMap = useMemo(() => {
     const map = new Map<string, NoteFolder>();
@@ -253,6 +286,63 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
   const activeNote = activeNoteId ? notes.find((n) => n.id === activeNoteId) || null : null;
   const isNoteLocked = !!(activeNote?.locked && !unlockedNoteIds.includes(activeNote.id));
   const isActiveDropNote = !!(activeNote && activeDropNoteId === activeNote.id);
+  const printableNote = useMemo<PrintableNotePayload | null>(() => {
+    if (!activeNote) return null;
+    const title = draftTitle.trim() || activeNote.title || 'Untitled';
+    return {
+      title,
+      content: draftContent,
+      contentFormat: draftContentFormat,
+      updatedAt: activeNote.updatedAt || Date.now(),
+      fileName: buildNotePdfFileName(title),
+      paper: 'A4',
+      locale: NOTE_PRINT_LOCALE,
+    };
+  }, [activeNote, draftContent, draftContentFormat, draftTitle]);
+
+  const reportError = useCallback((message: string) => {
+    setLocalError(message);
+    onNotify?.(message, 'error');
+  }, [onNotify]);
+
+  const reportSuccess = useCallback((message: string) => {
+    setLocalError(null);
+    onNotify?.(message, 'success');
+  }, [onNotify]);
+
+  const persistPreferredExportMode = useCallback((mode: PdfExportMode) => {
+    setPreferredExportMode(mode);
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(NOTE_EXPORT_MODE_STORAGE_KEY, mode);
+    } catch (_error) {
+      // Ignore storage failures and keep the in-memory preference.
+    }
+  }, []);
+
+  const getExportableNote = useCallback(() => {
+    if (!activeNote || !printableNote) return null;
+    if (isNoteLocked) {
+      reportError('Desbloquea el documento para exportar.');
+      return null;
+    }
+    if (!draftContent.trim()) {
+      reportError('El documento esta vacio.');
+      return null;
+    }
+    setLocalError(null);
+    return printableNote;
+  }, [activeNote, printableNote, isNoteLocked, draftContent, reportError]);
+
+  const triggerBrowserPrint = useReactToPrint({
+    contentRef: printDocumentRef,
+    documentTitle: printableNote ? printableNote.fileName.replace(/\.pdf$/i, '') : 'documento',
+    pageStyle: NOTE_PRINT_PAGE_STYLE,
+    onPrintError: (_location, error) => {
+      const message = error instanceof Error ? error.message : 'No se pudo abrir el dialogo de impresion.';
+      reportError(message);
+    },
+  });
 
   useEffect(() => {
     if (!activeNoteId || isNoteLocked) return;
@@ -270,10 +360,12 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
     if (!note) {
       setDraftTitle('');
       setDraftContent('');
+      setDraftContentFormat(DEFAULT_NEW_NOTE_CONTENT_FORMAT);
       setDraftTags('');
       return;
     }
     setDraftTitle(note.title || '');
+    setDraftContentFormat(normalizeNoteContentFormat(note.contentFormat));
     setDraftTags((note.tags || []).join(', '));
     if (note.locked) {
       setDraftContent('');
@@ -357,6 +449,7 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
       const baseUpdate: NoteDoc = {
         ...activeNote,
         title: draftTitle.trim() || 'Untitled',
+        contentFormat: draftContentFormat,
         tags,
         updatedAt: Date.now(),
       };
@@ -407,6 +500,29 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
     return () => window.removeEventListener('keydown', handleSaveShortcut);
   }, [activeNote, isNoteLocked, persistDraft]);
 
+  useEffect(() => {
+    if (!isExportMenuOpen) return;
+
+    const handleOutsideClick = (event: MouseEvent) => {
+      if (!exportMenuRef.current?.contains(event.target as Node)) {
+        setIsExportMenuOpen(false);
+      }
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsExportMenuOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleOutsideClick);
+    window.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick);
+      window.removeEventListener('keydown', handleEscape);
+    };
+  }, [isExportMenuOpen]);
+
   const handleCreateFolder = async () => {
     const name = newFolderName.trim();
     if (!name) return;
@@ -440,6 +556,7 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
       id: crypto.randomUUID(),
       title,
       content: '',
+      contentFormat: DEFAULT_NEW_NOTE_CONTENT_FORMAT,
       folderId: activeFolderId,
       tags: [],
       createdAt: now,
@@ -469,6 +586,7 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
     setUnlockedNoteIds((prev) => prev.filter((id) => id !== activeNote.id));
     setActiveNoteId(null);
     setDraftContent('');
+    setDraftContentFormat(DEFAULT_NEW_NOTE_CONTENT_FORMAT);
     setDraftTitle('');
     setDraftTags('');
   };
@@ -489,6 +607,7 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
     const lockedUpdate: NoteDoc = {
       ...activeNote,
       title: draftTitle.trim() || 'Untitled',
+      contentFormat: draftContentFormat,
       tags: normalizeTags(draftTags),
       locked: true,
       encryptedContent: cipherText,
@@ -566,6 +685,7 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
     const unlockedUpdate: NoteDoc = {
       ...activeNote,
       title: draftTitle.trim() || 'Untitled',
+      contentFormat: draftContentFormat,
       tags: normalizeTags(draftTags),
       locked: false,
       content: plain,
@@ -582,53 +702,78 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
     setNoteUnlockPassword('');
   };
 
-  const handleExportToPDF = async () => {
-    if (!activeNote) return;
-    if (isNoteLocked) {
-      setLocalError('Desbloquea el documento para exportar.');
+  const runPdfExport = useCallback(async (mode: PdfExportMode) => {
+    const noteToExport = getExportableNote();
+    if (!noteToExport) return;
+
+    if (mode === 'external-chromium' && !externalExporterConfigured) {
+      reportError('Configura VITE_PDF_EXPORT_API_URL para usar PDF alta fidelidad.');
       return;
     }
-    if (!draftContent.trim()) {
-      setLocalError('El documento esta vacio.');
-      return;
+
+    setIsExportMenuOpen(false);
+    persistPreferredExportMode(mode);
+
+    if (mode === 'external-chromium') {
+      setExportingMode(mode);
+    } else {
+      reportSuccess('Abriendo dialogo de impresion para guardar el PDF.');
     }
-    setLocalError(null);
-    const tempDiv = document.createElement('div');
-    tempDiv.style.padding = '20px';
-    tempDiv.style.fontFamily = 'Arial, sans-serif';
-    tempDiv.style.fontSize = '12px';
-    tempDiv.style.whiteSpace = 'pre-wrap';
-    tempDiv.style.color = '#0f172a';
-    tempDiv.style.width = '794px';
-    tempDiv.textContent = draftContent;
-    document.body.appendChild(tempDiv);
+
     try {
-      const canvas = await html2canvas(tempDiv);
-      const imgData = canvas.toDataURL('image/png');
-
-      const pdf = new jsPDF('p', 'mm', 'a4');
-      const imgWidth = 210;
-      const pageHeight = 295;
-      const imgHeight = (canvas.height * imgWidth) / canvas.width;
-      let heightLeft = imgHeight;
-      let position = 0;
-
-      pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
-      heightLeft -= pageHeight;
-
-      while (heightLeft > 0) {
-        position = heightLeft - imgHeight;
-        pdf.addPage();
-        pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
-        heightLeft -= pageHeight;
+      await exportNotePdf({
+        mode,
+        note: noteToExport,
+        triggerPrint: triggerBrowserPrint,
+      });
+      if (mode === 'external-chromium') {
+        reportSuccess(`PDF descargado con ${PDF_EXPORT_MODE_LABELS[mode].toLowerCase()}.`);
       }
-
-      const safeTitle = (activeNote.title || 'documento').replace(/[\\/:*?"<>|]+/g, '-');
-      pdf.save(`${safeTitle}.pdf`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo exportar el PDF.';
+      reportError(message);
     } finally {
-      document.body.removeChild(tempDiv);
+      if (mode === 'external-chromium') {
+        setExportingMode(null);
+      }
     }
+  }, [
+    externalExporterConfigured,
+    getExportableNote,
+    persistPreferredExportMode,
+    reportError,
+    reportSuccess,
+    triggerBrowserPrint,
+  ]);
+
+  const handlePrimaryPdfExport = () => {
+    void runPdfExport(primaryExportMode);
   };
+
+  const handlePdfExportChoice = (mode: PdfExportMode) => {
+    void runPdfExport(mode);
+  };
+
+  useEffect(() => {
+    const handlePrintShortcut = (event: KeyboardEvent) => {
+      const isPrintShortcut = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'p';
+      if (!isPrintShortcut || !activeNote) return;
+
+      event.preventDefault();
+      const noteToExport = getExportableNote();
+      if (!noteToExport) return;
+
+      if (resolvedPreferredExportMode) {
+        void runPdfExport(resolvedPreferredExportMode);
+        return;
+      }
+      setLocalError(null);
+      setIsExportMenuOpen(true);
+    };
+
+    window.addEventListener('keydown', handlePrintShortcut);
+    return () => window.removeEventListener('keydown', handlePrintShortcut);
+  }, [activeNote, getExportableNote, resolvedPreferredExportMode, runPdfExport]);
 
   const handleLockFolder = async () => {
     if (!activeFolder) return;
@@ -1244,6 +1389,26 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
                       </div>
                     </div>
                   )}
+                  <div className="mb-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <div className="flex items-center gap-3">
+                      <label className="text-[11px] uppercase tracking-wider text-slate-500">Formato</label>
+                      <select
+                        value={draftContentFormat}
+                        onChange={(e) => setDraftContentFormat(e.target.value as NoteContentFormat)}
+                        disabled={isNoteLocked}
+                        className="bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 disabled:opacity-50"
+                      >
+                        {(Object.entries(NOTE_CONTENT_FORMAT_LABELS) as Array<[NoteContentFormat, string]>).map(([value, label]) => (
+                          <option key={value} value={value}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <p className="text-[11px] text-slate-500">
+                      Markdown mejora headings, listas y links en el PDF.
+                    </p>
+                  </div>
                   <textarea
                     ref={editorTextareaRef}
                     value={draftContent}
@@ -1294,13 +1459,57 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
 
                         <div className="border border-slate-800 rounded-lg p-3 space-y-2">
                           <p className="text-xs uppercase tracking-wider text-slate-500">Seguridad documento</p>
-                          <button
-                            onClick={handleExportToPDF}
-                            disabled={!activeNote || isNoteLocked}
-                            className="w-full bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs py-1 rounded disabled:opacity-50"
-                          >
-                            Exportar a PDF
-                          </button>
+                          <div className="relative" ref={exportMenuRef}>
+                            <div className="flex rounded overflow-hidden border border-slate-700">
+                              <button
+                                onClick={handlePrimaryPdfExport}
+                                disabled={!activeNote || isNoteLocked || exportingMode === 'external-chromium'}
+                                className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs py-2 px-3 text-left disabled:opacity-50"
+                              >
+                                {exportingMode === 'external-chromium' ? 'Exportando PDF...' : 'Exportar PDF'}
+                              </button>
+                              <button
+                                onClick={() => setIsExportMenuOpen((prev) => !prev)}
+                                disabled={!activeNote || isNoteLocked || exportingMode === 'external-chromium'}
+                                className="px-3 bg-slate-900 hover:bg-slate-800 text-slate-200 border-l border-slate-700 disabled:opacity-50"
+                                title="Elegir motor de exportacion"
+                              >
+                                <ChevronDownIcon className={`w-4 h-4 transition-transform ${isExportMenuOpen ? 'rotate-180' : ''}`} />
+                              </button>
+                            </div>
+                            <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500">
+                              <span>Motor actual: {PDF_EXPORT_MODE_LABELS[primaryExportMode]}</span>
+                              <span>Ctrl+P / Cmd+P</span>
+                            </div>
+                            {isExportMenuOpen && (
+                              <div className="absolute right-0 z-30 mt-2 w-72 rounded-lg border border-slate-700 bg-slate-950 shadow-xl">
+                                <button
+                                  onClick={() => handlePdfExportChoice('offline-browser')}
+                                  className="w-full text-left px-3 py-3 hover:bg-slate-900 border-b border-slate-800"
+                                >
+                                  <div className="text-sm text-slate-100">{PDF_EXPORT_MODE_LABELS['offline-browser']}</div>
+                                  <div className="text-[11px] text-slate-500">
+                                    Texto seleccionable, links reales y print-to-PDF local.
+                                  </div>
+                                </button>
+                                <button
+                                  onClick={() => handlePdfExportChoice('external-chromium')}
+                                  disabled={!externalExporterConfigured}
+                                  className="w-full text-left px-3 py-3 hover:bg-slate-900 disabled:hover:bg-transparent disabled:opacity-50"
+                                >
+                                  <div className="text-sm text-slate-100">{PDF_EXPORT_MODE_LABELS['external-chromium']}</div>
+                                  <div className="text-[11px] text-slate-500">
+                                    Motor externo Chromium/Playwright para PDF mas consistente.
+                                  </div>
+                                </button>
+                                {!externalExporterConfigured && (
+                                  <p className="px-3 pb-3 text-[11px] text-amber-400">
+                                    Configura `VITE_PDF_EXPORT_API_URL` para habilitar este modo.
+                                  </p>
+                                )}
+                              </div>
+                            )}
+                          </div>
                           {activeNote.locked ? (
                             <>
                               <input
@@ -1366,6 +1575,7 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
           <p className="mt-3 text-xs text-rose-400">{localError}</p>
         )}
       </section>
+      {printableNote && <NotePrintDocument ref={printDocumentRef} note={printableNote} />}
     </div>
   );
 };

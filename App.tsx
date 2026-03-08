@@ -15,6 +15,7 @@ import { wakeServices, type WakeBatchResult, type WakeTrigger } from './services
 import { Toast } from './components/Toast';
 import { VoiceDictation } from './components/VoiceDictation';
 import { buildMedicineAlerts } from './utils/medicineAlerts';
+import { DEFAULT_NEW_NOTE_CONTENT_FORMAT, normalizeNoteContentFormat } from './utils/noteContent';
 
 type NotificationFilter = 'today' | 'tomorrow' | 'week';
 type DismissedNotificationsMap = Record<string, number>;
@@ -351,7 +352,10 @@ function App() {
             // Load Notes + Folders
             const loadedFolders = await db.getAll('note_folders');
             setNoteFolders(loadedFolders);
-            const loadedNotes = await db.getAll('notes');
+            const loadedNotes = (await db.getAll('notes')).map((note) => ({
+              ...note,
+              contentFormat: normalizeNoteContentFormat(note.contentFormat),
+            }));
             const sortedNotes = loadedNotes.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
             setNotes(sortedNotes);
 
@@ -927,13 +931,21 @@ function App() {
 
   // --- Handlers: Notes ---
   const handleAddNote = useCallback(async (note: NoteDoc) => {
-      setNotes(prev => [note, ...prev]);
-      await db.putItem('notes', note);
+      const normalizedNote: NoteDoc = {
+        ...note,
+        contentFormat: normalizeNoteContentFormat(note.contentFormat),
+      };
+      setNotes(prev => [normalizedNote, ...prev]);
+      await db.putItem('notes', normalizedNote);
   }, []);
 
   const handleUpdateNote = async (updatedNote: NoteDoc) => {
-      setNotes(prev => prev.map(n => n.id === updatedNote.id ? updatedNote : n));
-      await db.putItem('notes', updatedNote);
+      const normalizedNote: NoteDoc = {
+        ...updatedNote,
+        contentFormat: normalizeNoteContentFormat(updatedNote.contentFormat),
+      };
+      setNotes(prev => prev.map(n => n.id === normalizedNote.id ? normalizedNote : n));
+      await db.putItem('notes', normalizedNote);
   };
 
   const handleDeleteNote = async (id: string) => {
@@ -1353,6 +1365,7 @@ function App() {
         id: crypto.randomUUID(),
         title: 'Untitled',
         content: '',
+        contentFormat: DEFAULT_NEW_NOTE_CONTENT_FORMAT,
         folderId: null,
         tags: [],
         createdAt: now,
@@ -1647,6 +1660,7 @@ function App() {
                 onOpenAttachment={openAttachment}
                 onDeleteNoteAttachment={removeNoteAttachment}
                 activeDropNoteId={dragTargetNoteId}
+                onNotify={(message, type) => setNotification({ message, type })}
             />
         );
     }

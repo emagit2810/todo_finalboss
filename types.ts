@@ -1,5 +1,7 @@
 
 export type Priority = 'P1' | 'P2' | 'P3' | 'P4';
+export type NoteContentFormat = 'plain' | 'markdown';
+export type PdfExportMode = 'offline-browser' | 'external-chromium';
 
 export interface Subtask {
   id: string;
@@ -65,6 +67,7 @@ export interface NoteDoc {
   id: string;
   title: string;
   content?: string;
+  contentFormat?: NoteContentFormat;
   folderId?: string | null;
   tags?: string[];
   createdAt: number;
