@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Todo, ViewMode, Medicine, Expense, Priority, Subtask, NoteDoc, NoteFolder, AppNotification, AttachmentMeta } from './types';
+import { Todo, ViewMode, Medicine, Expense, Priority, Subtask, NoteDoc, NoteFolder, AppNotification, AttachmentMeta, InlineImageInsertSource } from './types';
 import { TodoItem } from './components/TodoItem';
 import { brainstormTasks } from './services/geminiService';
 import { PlusIcon, BrainIcon, ArrowsExpandIcon, ArrowsCollapseIcon, FlagIcon, BellIcon, ClockIcon, DocumentIcon, XMarkIcon } from './components/Icons';
@@ -16,6 +16,7 @@ import { Toast } from './components/Toast';
 import { VoiceDictation } from './components/VoiceDictation';
 import { buildMedicineAlerts } from './utils/medicineAlerts';
 import { DEFAULT_NEW_NOTE_CONTENT_FORMAT, normalizeNoteContentFormat } from './utils/noteContent';
+import { buildInlineImagePreviewBlob, deriveInlineImageAlt, isInlineImageAttachment } from './utils/noteInlineImages';
 
 type NotificationFilter = 'today' | 'tomorrow' | 'week';
 type DismissedNotificationsMap = Record<string, number>;
@@ -55,6 +56,13 @@ const ALLOWED_ATTACHMENT_MIME_TYPES = new Set([
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'application/octet-stream',
 ]);
+const INLINE_IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp']);
+const INLINE_IMAGE_MIME_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+]);
+const MAX_INLINE_IMAGES_PER_NOTE = 12;
 
 const parseServiceWakeIntervalMs = () => {
   const raw = (import.meta as any)?.env?.VITE_SERVICE_WAKE_INTERVAL_MS;
@@ -169,6 +177,24 @@ const validateAttachmentFile = (file: File) => {
   const fileType = (file.type || '').toLowerCase();
   if (fileType && !ALLOWED_ATTACHMENT_MIME_TYPES.has(fileType)) {
     return { valid: false, reason: `MIME no permitido (${fileType}): ${file.name}` };
+  }
+  return { valid: true, reason: '' };
+};
+
+const validateInlineImageFile = (file: File) => {
+  const extension = getFileExtension(file.name);
+  if (!INLINE_IMAGE_EXTENSIONS.has(extension)) {
+    return { valid: false, reason: `Imagen no permitida: ${file.name}` };
+  }
+  if (file.size <= 0) {
+    return { valid: false, reason: `Imagen vacia: ${file.name}` };
+  }
+  if (file.size > MAX_ATTACHMENT_SIZE_BYTES) {
+    return { valid: false, reason: `Excede 20MB: ${file.name}` };
+  }
+  const fileType = (file.type || '').toLowerCase();
+  if (!fileType || !INLINE_IMAGE_MIME_TYPES.has(fileType)) {
+    return { valid: false, reason: `Formato no permitido (${fileType || 'desconocido'}): ${file.name}` };
   }
   return { valid: true, reason: '' };
 };
@@ -952,10 +978,13 @@ function App() {
       const noteToDelete = notes.find((n) => n.id === id);
       setNotes(prev => prev.filter(n => n.id !== id));
       await db.deleteItem('notes', id);
-      const attachmentIds = (noteToDelete?.attachments || []).map((attachment) => attachment.id);
-      for (const attachmentId of attachmentIds) {
+      const attachmentsToDelete = noteToDelete?.attachments || [];
+      for (const attachment of attachmentsToDelete) {
         try {
-          await db.deleteAttachmentBlob(attachmentId);
+          await db.deleteAttachmentBlob(attachment.id);
+          if (attachment.previewAttachmentId) {
+            await db.deleteAttachmentBlob(attachment.previewAttachmentId);
+          }
         } catch (error) {
           console.error('No se pudo borrar adjunto de nota', error);
         }
@@ -1020,6 +1049,87 @@ function App() {
     }
   };
 
+  const prepareInlineNoteImages = useCallback(async (
+    noteId: string,
+    files: File[],
+    source: InlineImageInsertSource
+  ) => {
+    const note = notes.find((item) => item.id === noteId);
+    if (!note) {
+      throw new Error('La nota seleccionada no existe.');
+    }
+    if (note.locked) {
+      throw new Error('No se puede insertar imagen en una nota bloqueada.');
+    }
+
+    const existingInlineImages = (note.attachments || []).filter(isInlineImageAttachment);
+    const dedupedFiles = files.filter((file) => {
+      const cleanName = sanitizeAttachmentName(file.name);
+      return !existingInlineImages.some((attachment) => attachment.name === cleanName && attachment.size === file.size);
+    });
+
+    if (dedupedFiles.length === 0) {
+      throw new Error('Todas esas imagenes ya estaban insertadas en la nota.');
+    }
+    if (existingInlineImages.length + dedupedFiles.length > MAX_INLINE_IMAGES_PER_NOTE) {
+      throw new Error(`Maximo ${MAX_INLINE_IMAGES_PER_NOTE} imagenes inline por nota.`);
+    }
+
+    const savedAttachments: AttachmentMeta[] = [];
+    const blobIdsToCleanup = new Set<string>();
+
+    try {
+      for (const file of dedupedFiles) {
+        const validation = validateInlineImageFile(file);
+        if (!validation.valid) {
+          throw new Error(validation.reason);
+        }
+
+        const attachmentId = crypto.randomUUID();
+        const cleanName = sanitizeAttachmentName(file.name);
+        await db.putAttachmentBlob(attachmentId, file);
+        blobIdsToCleanup.add(attachmentId);
+
+        const preview = await buildInlineImagePreviewBlob(file);
+        let previewAttachmentId: string | undefined;
+        if (!preview.reusedOriginal) {
+          previewAttachmentId = crypto.randomUUID();
+          await db.putAttachmentBlob(previewAttachmentId, preview.blob);
+          blobIdsToCleanup.add(previewAttachmentId);
+        }
+
+        savedAttachments.push({
+          id: attachmentId,
+          name: cleanName,
+          mimeType: file.type || 'image/png',
+          size: file.size,
+          createdAt: Date.now(),
+          kind: 'inline-image',
+          width: preview.width,
+          height: preview.height,
+          previewAttachmentId,
+          alt: deriveInlineImageAlt(cleanName),
+          source,
+        });
+      }
+
+      return savedAttachments;
+    } catch (error) {
+      for (const blobId of blobIdsToCleanup) {
+        try {
+          await db.deleteAttachmentBlob(blobId);
+        } catch (cleanupError) {
+          console.error('Error limpiando imagen inline tras fallo', cleanupError);
+        }
+      }
+      throw error;
+    }
+  }, [notes]);
+
+  const readAttachmentBlob = useCallback(async (attachmentId: string) => {
+    return await db.getAttachmentBlob(attachmentId);
+  }, []);
+
   const attachFilesToTodo = useCallback(async (todoId: string, files: File[]) => {
     const todo = todos.find((item) => item.id === todoId);
     if (!todo) {
@@ -1059,6 +1169,7 @@ function App() {
     }
 
     const currentAttachments = note.attachments || [];
+    const currentFileAttachments = currentAttachments.filter((attachment) => !isInlineImageAttachment(attachment));
     const dedupedFiles = files.filter((file) => {
       const cleanName = sanitizeAttachmentName(file.name);
       return !currentAttachments.some((a) => a.name === cleanName && a.size === file.size);
@@ -1067,7 +1178,7 @@ function App() {
     if (dedupedFiles.length === 0) {
       throw new Error('Todos los archivos ya estaban adjuntos en esta nota.');
     }
-    if (currentAttachments.length + dedupedFiles.length > MAX_ATTACHMENTS_PER_ENTITY) {
+    if (currentFileAttachments.length + dedupedFiles.length > MAX_ATTACHMENTS_PER_ENTITY) {
       throw new Error(`Maximo ${MAX_ATTACHMENTS_PER_ENTITY} adjuntos por nota.`);
     }
 
@@ -1121,6 +1232,7 @@ function App() {
   const removeNoteAttachment = useCallback(async (noteId: string, attachmentId: string) => {
     const note = notes.find((item) => item.id === noteId);
     if (!note) return;
+    const attachmentToDelete = (note.attachments || []).find((attachment) => attachment.id === attachmentId);
     const nextAttachments = (note.attachments || []).filter((attachment) => attachment.id !== attachmentId);
     const updatedNote: NoteDoc = {
       ...note,
@@ -1131,6 +1243,9 @@ function App() {
     setNotes((prev) => prev.map((item) => (item.id === updatedNote.id ? updatedNote : item)));
     try {
       await db.deleteAttachmentBlob(attachmentId);
+      if (attachmentToDelete?.previewAttachmentId) {
+        await db.deleteAttachmentBlob(attachmentToDelete.previewAttachmentId);
+      }
     } catch (error) {
       console.error('No se pudo borrar blob adjunto de nota', error);
     }
@@ -1659,6 +1774,8 @@ function App() {
                 onUpdateTodo={handleUpdateTodo}
                 onOpenAttachment={openAttachment}
                 onDeleteNoteAttachment={removeNoteAttachment}
+                onPrepareInlineNoteImages={prepareInlineNoteImages}
+                onReadAttachmentBlob={readAttachmentBlob}
                 activeDropNoteId={dragTargetNoteId}
                 onNotify={(message, type) => setNotification({ message, type })}
             />

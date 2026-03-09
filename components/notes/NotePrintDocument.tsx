@@ -1,9 +1,7 @@
 import React, { forwardRef } from 'react';
 import LinkifyIt from 'linkify-it';
-import ReactMarkdown from 'react-markdown';
-import remarkBreaks from 'remark-breaks';
-import remarkGfm from 'remark-gfm';
 import { PrintableNotePayload } from '../../exporters/notePdf';
+import { NoteMarkdownRenderer } from './NoteMarkdownRenderer';
 
 const linkify = new LinkifyIt();
 
@@ -60,44 +58,6 @@ const PlainTextDocumentBody: React.FC<{ content: string }> = ({ content }) => {
       ))}
     </>
   );
-};
-
-const markdownComponents = {
-  a: ({ node: _node, ...props }: any) => (
-    <a
-      {...props}
-      href={props.href}
-      target="_blank"
-      rel="noreferrer"
-      className="note-print-link"
-    />
-  ),
-  p: ({ node: _node, ...props }: any) => <p {...props} className="note-print-paragraph" />,
-  h1: ({ node: _node, ...props }: any) => <h1 {...props} className="note-print-h1" />,
-  h2: ({ node: _node, ...props }: any) => <h2 {...props} className="note-print-h2" />,
-  h3: ({ node: _node, ...props }: any) => <h3 {...props} className="note-print-h3" />,
-  ul: ({ node: _node, ordered: _ordered, ...props }: any) => <ul {...props} className="note-print-list" />,
-  ol: ({ node: _node, ordered: _ordered, ...props }: any) => <ol {...props} className="note-print-list note-print-list-ordered" />,
-  li: ({ node: _node, ordered: _ordered, ...props }: any) => <li {...props} className="note-print-list-item" />,
-  blockquote: ({ node: _node, ...props }: any) => <blockquote {...props} className="note-print-blockquote" />,
-  pre: ({ node: _node, ...props }: any) => <pre {...props} className="note-print-pre" />,
-  code: ({ node: _node, inline, ...props }: any) => {
-    const isInline = Boolean(inline);
-    return (
-      <code
-        {...props}
-        className={isInline ? 'note-print-inline-code' : 'note-print-code-block'}
-      />
-    );
-  },
-  table: ({ node: _node, ...props }: any) => (
-    <div className="note-print-table-wrap">
-      <table {...props} className="note-print-table" />
-    </div>
-  ),
-  th: ({ node: _node, isHeader: _isHeader, ...props }: any) => <th {...props} className="note-print-table-head" />,
-  td: ({ node: _node, isHeader: _isHeader, ...props }: any) => <td {...props} className="note-print-table-cell" />,
-  hr: ({ node: _node, ...props }: any) => <hr {...props} className="note-print-divider" />,
 };
 
 export const NOTE_PRINT_PAGE_STYLE = `
@@ -297,6 +257,67 @@ export const NOTE_PRINT_PAGE_STYLE = `
     border-top: 1px solid #dbe3ef;
     margin: 18px 0;
   }
+
+  .note-print-figure,
+  .note-print-image-external,
+  .note-print-appendix-item {
+    break-inside: avoid-page;
+  }
+
+  .note-print-figure {
+    margin: 0 0 16px;
+  }
+
+  .note-print-image {
+    display: block;
+    max-width: 100%;
+    width: auto;
+    height: auto;
+    max-height: 220mm;
+    margin: 0 auto;
+    border-radius: 10px;
+    object-fit: contain;
+  }
+
+  .note-print-figcaption {
+    margin-top: 8px;
+    color: #64748b;
+    font-size: 9pt;
+    text-align: center;
+  }
+
+  .note-print-image-missing {
+    margin: 0 0 14px;
+    padding: 10px 12px;
+    border: 1px dashed #d97706;
+    border-radius: 8px;
+    color: #92400e;
+    background: #fffbeb;
+    font-size: 9.5pt;
+  }
+
+  .note-print-appendices {
+    margin-top: 28px;
+    break-before: page;
+  }
+
+  .note-print-appendices-title {
+    margin: 0 0 14px;
+    font-size: 18pt;
+    line-height: 1.25;
+    font-weight: 700;
+  }
+
+  .note-print-appendix-item {
+    margin: 0 0 20px;
+  }
+
+  .note-print-appendix-item-title {
+    margin: 0 0 10px;
+    font-size: 12pt;
+    line-height: 1.35;
+    font-weight: 700;
+  }
 `;
 
 export const NotePrintDocument = forwardRef<HTMLDivElement, { note: PrintableNotePayload }>(
@@ -305,6 +326,8 @@ export const NotePrintDocument = forwardRef<HTMLDivElement, { note: PrintableNot
       dateStyle: 'medium',
       timeStyle: 'short',
     }).format(new Date(note.updatedAt));
+    const imageSources = Object.fromEntries((note.assets || []).map((asset) => [asset.id, asset]));
+    const markdownContent = note.resolvedContent || note.content;
 
     return (
       <div ref={ref} className="note-print-root" aria-hidden="true">
@@ -316,16 +339,27 @@ export const NotePrintDocument = forwardRef<HTMLDivElement, { note: PrintableNot
 
           <section className="note-print-body">
             {note.contentFormat === 'markdown' ? (
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm, remarkBreaks]}
-                components={markdownComponents}
-              >
-                {note.content}
-              </ReactMarkdown>
+              <NoteMarkdownRenderer
+                content={markdownContent}
+                imageSources={imageSources}
+                variant="print"
+              />
             ) : (
               <PlainTextDocumentBody content={note.content} />
             )}
           </section>
+
+          {note.appendices && note.appendices.length > 0 && (
+            <section className="note-print-appendices">
+              <h2 className="note-print-appendices-title">Anexos de texto</h2>
+              {note.appendices.map((appendix) => (
+                <article key={appendix.id} className="note-print-appendix-item">
+                  <h3 className="note-print-appendix-item-title">{appendix.title}</h3>
+                  <PlainTextDocumentBody content={appendix.text} />
+                </article>
+              ))}
+            </section>
+          )}
         </article>
       </div>
     );

@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { NoteContentFormat, NoteDoc, NoteFolder, Todo, Priority, AttachmentMeta, PdfExportMode } from '../types';
+import { NoteContentFormat, NoteDoc, NoteFolder, Todo, Priority, AttachmentMeta, PdfExportMode, InlineImageInsertSource } from '../types';
 import { DocumentIcon, FolderIcon, PlusIcon, TrashIcon, ChevronDownIcon, ChevronRightIcon, ArrowsCollapseIcon, ArrowsExpandIcon, XMarkIcon } from './Icons';
 import { useReactToPrint } from 'react-to-print';
 import { NotePrintDocument, NOTE_PRINT_PAGE_STYLE } from './notes/NotePrintDocument';
+import { NoteMarkdownPreview } from './notes/NoteMarkdownPreview';
 import { PrintableNotePayload, exportNotePdf, isExternalPdfExporterConfigured } from '../exporters/notePdf';
 import { deriveKeyAndHash, decryptWithKey, encryptWithKey, generateSalt } from '../utils/crypto';
 import {
@@ -14,6 +15,14 @@ import {
   normalizeNoteContentFormat,
   parsePdfExportMode,
 } from '../utils/noteContent';
+import {
+  NoteInlineImageAsset,
+  extractInlineImageRefs,
+  insertInlineImageTokensAtSelection,
+  readBlobAsDataUrl,
+  removeInlineImageTokenByAttachmentId,
+  replaceInlineImageTokens,
+} from '../utils/noteInlineImages';
 
 interface NotesPanelProps {
   notes: NoteDoc[];
@@ -30,6 +39,12 @@ interface NotesPanelProps {
   onUpdateTodo?: (todo: Todo) => void;
   onOpenAttachment?: (attachment: AttachmentMeta) => void;
   onDeleteNoteAttachment?: (noteId: string, attachmentId: string) => void;
+  onPrepareInlineNoteImages?: (
+    noteId: string,
+    files: File[],
+    source: InlineImageInsertSource
+  ) => Promise<AttachmentMeta[]>;
+  onReadAttachmentBlob?: (attachmentId: string) => Promise<Blob | null>;
   activeDropNoteId?: string | null;
   onNotify?: (message: string, type: 'success' | 'error') => void;
 }
@@ -44,6 +59,7 @@ const PRESET_TAGS = [
   'clave',
   'tema estudiar',
 ];
+const TEXT_ATTACHMENT_EXTENSION_REGEX = /\.txt$/i;
 
 const normalizeTags = (value: string) => {
   const tags = value
@@ -52,6 +68,13 @@ const normalizeTags = (value: string) => {
     .filter((t) => t.length > 0);
   return Array.from(new Set(tags.map((t) => t.toLowerCase())));
 };
+
+const isPlainTextAttachment = (attachment: AttachmentMeta) =>
+  attachment.kind !== 'inline-image' &&
+  (attachment.mimeType === 'text/plain' || TEXT_ATTACHMENT_EXTENSION_REGEX.test(attachment.name));
+
+const buildInlinePreviewSignature = (refs: Array<{ attachmentId: string; alt: string }>) =>
+  refs.map((ref) => `${ref.attachmentId}:${ref.alt}`).join('|');
 
 const NotePanelEmptyState = () => (
   <div className="flex flex-col items-center justify-center h-full text-slate-500">
@@ -74,6 +97,8 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
   onUpdateTodo,
   onOpenAttachment,
   onDeleteNoteAttachment,
+  onPrepareInlineNoteImages,
+  onReadAttachmentBlob,
   activeDropNoteId = null,
   onNotify,
 }) => {
@@ -122,10 +147,15 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
 
   const noteKeysRef = useRef<Map<string, CryptoKey>>(new Map());
   const editorTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const inlineImageInputRef = useRef<HTMLInputElement | null>(null);
   const printDocumentRef = useRef<HTMLDivElement | null>(null);
   const exportMenuRef = useRef<HTMLDivElement | null>(null);
+  const pendingPrintRenderResolveRef = useRef<(() => void) | null>(null);
   const [unlockedNoteIds, setUnlockedNoteIds] = useState<string[]>([]);
   const [unlockedFolderIds, setUnlockedFolderIds] = useState<string[]>([]);
+  const [inlineImagePreviewMap, setInlineImagePreviewMap] = useState<Record<string, NoteInlineImageAsset>>({});
+  const [inlineImageBusy, setInlineImageBusy] = useState(false);
+  const [preparedPrintNote, setPreparedPrintNote] = useState<PrintableNotePayload | null>(null);
 
   const externalExporterConfigured = isExternalPdfExporterConfigured();
   const resolvedPreferredExportMode =
@@ -286,6 +316,43 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
   const activeNote = activeNoteId ? notes.find((n) => n.id === activeNoteId) || null : null;
   const isNoteLocked = !!(activeNote?.locked && !unlockedNoteIds.includes(activeNote.id));
   const isActiveDropNote = !!(activeNote && activeDropNoteId === activeNote.id);
+  const inlineImageRefs = useMemo(
+    () => (draftContentFormat === 'markdown' ? extractInlineImageRefs(draftContent) : []),
+    [draftContent, draftContentFormat]
+  );
+  const inlineImagePreviewSignature = useMemo(
+    () => buildInlinePreviewSignature(inlineImageRefs),
+    [inlineImageRefs]
+  );
+  const uniqueInlineImageRefs = useMemo(
+    () => inlineImageRefs.filter((ref, index, list) => list.findIndex((item) => item.attachmentId === ref.attachmentId) === index),
+    [inlineImagePreviewSignature]
+  );
+  const containsInlineImages = inlineImageRefs.length > 0;
+  const visibleNoteAttachments = useMemo(
+    () => (activeNote?.attachments || []).filter((attachment) => attachment.kind !== 'inline-image'),
+    [activeNote]
+  );
+  const textAppendixCandidates = useMemo(
+    () => visibleNoteAttachments.filter(isPlainTextAttachment),
+    [visibleNoteAttachments]
+  );
+  const orphanInlineAttachments = useMemo(() => {
+    if (!activeNote) return [];
+    const referencedIds = new Set(inlineImageRefs.map((ref) => ref.attachmentId));
+    return (activeNote.attachments || []).filter(
+      (attachment) => attachment.kind === 'inline-image' && !referencedIds.has(attachment.id)
+    );
+  }, [activeNote, inlineImageRefs]);
+  const canUseInlineImages =
+    !!activeNote &&
+    !isNoteLocked &&
+    draftContentFormat === 'markdown' &&
+    externalExporterConfigured &&
+    !!onPrepareInlineNoteImages &&
+    !!onReadAttachmentBlob;
+  const effectivePrimaryExportMode =
+    containsInlineImages && externalExporterConfigured ? 'external-chromium' : primaryExportMode;
   const printableNote = useMemo<PrintableNotePayload | null>(() => {
     if (!activeNote) return null;
     const title = draftTitle.trim() || activeNote.title || 'Untitled';
@@ -299,6 +366,7 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
       locale: NOTE_PRINT_LOCALE,
     };
   }, [activeNote, draftContent, draftContentFormat, draftTitle]);
+  const printableDocumentNote = preparedPrintNote || printableNote;
 
   const reportError = useCallback((message: string) => {
     setLocalError(message);
@@ -326,19 +394,117 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
       reportError('Desbloquea el documento para exportar.');
       return null;
     }
-    if (!draftContent.trim()) {
+    if (!draftContent.trim() && textAppendixCandidates.length === 0) {
       reportError('El documento esta vacio.');
       return null;
     }
     setLocalError(null);
     return printableNote;
-  }, [activeNote, printableNote, isNoteLocked, draftContent, reportError]);
+  }, [activeNote, printableNote, isNoteLocked, draftContent, reportError, textAppendixCandidates.length]);
+
+  const hydratePrintableNoteForExport = useCallback(async (
+    note: PrintableNotePayload,
+    options?: { includeInlineImages?: boolean }
+  ) => {
+    if (!onReadAttachmentBlob) {
+      return note;
+    }
+
+    const attachments = activeNote?.attachments || [];
+    const textAppendices = await Promise.all(
+      attachments
+        .filter(isPlainTextAttachment)
+        .map(async (attachment) => {
+          const blob = await onReadAttachmentBlob(attachment.id);
+          if (!blob) return null;
+          try {
+            return {
+              id: attachment.id,
+              title: attachment.name,
+              text: (await blob.text()).replace(/^\uFEFF/, ''),
+              mimeType: 'text/plain' as const,
+            };
+          } catch (_error) {
+            return null;
+          }
+        })
+    );
+
+    const nextNote: PrintableNotePayload = {
+      ...note,
+      appendices: textAppendices.filter((appendix): appendix is NonNullable<typeof appendix> => !!appendix),
+    };
+
+    if (!options?.includeInlineImages || note.contentFormat !== 'markdown') {
+      return nextNote;
+    }
+
+    const refs = extractInlineImageRefs(note.content);
+    if (refs.length === 0) {
+      return nextNote;
+    }
+
+    const assetsList = await Promise.all(refs.map(async (ref) => {
+      const attachment = attachments.find((item) => item.id === ref.attachmentId && item.kind === 'inline-image');
+      if (!attachment) return null;
+      const originalBlob = await onReadAttachmentBlob(attachment.id);
+      const blob = originalBlob || (
+        attachment.previewAttachmentId
+          ? await onReadAttachmentBlob(attachment.previewAttachmentId)
+          : null
+      );
+      if (!blob) return null;
+
+      return {
+        id: attachment.id,
+        alt: attachment.alt || ref.alt || attachment.name || 'imagen',
+        dataUrl: await readBlobAsDataUrl(blob),
+        mimeType: blob.type || attachment.mimeType,
+        width: attachment.width,
+        height: attachment.height,
+      } satisfies NoteInlineImageAsset;
+    }));
+
+    const assets = Object.fromEntries(
+      assetsList
+        .filter((asset): asset is NoteInlineImageAsset => !!asset)
+        .map((asset) => [asset.id, asset])
+    );
+
+    return {
+      ...nextNote,
+      assets: Object.values(assets),
+      resolvedContent: replaceInlineImageTokens(note.content, (ref) => assets[ref.attachmentId]),
+      containsInlineImages: Object.keys(assets).length > 0,
+    };
+  }, [activeNote, onReadAttachmentBlob]);
+
+  const mountPreparedPrintNote = useCallback((note: PrintableNotePayload) => (
+    new Promise<void>((resolve) => {
+      pendingPrintRenderResolveRef.current = resolve;
+      setPreparedPrintNote(note);
+    })
+  ), []);
+
+  useEffect(() => {
+    if (!preparedPrintNote || !pendingPrintRenderResolveRef.current) return;
+    window.requestAnimationFrame(() => {
+      pendingPrintRenderResolveRef.current?.();
+      pendingPrintRenderResolveRef.current = null;
+    });
+  }, [preparedPrintNote]);
 
   const triggerBrowserPrint = useReactToPrint({
     contentRef: printDocumentRef,
-    documentTitle: printableNote ? printableNote.fileName.replace(/\.pdf$/i, '') : 'documento',
+    documentTitle: printableDocumentNote ? printableDocumentNote.fileName.replace(/\.pdf$/i, '') : 'documento',
     pageStyle: NOTE_PRINT_PAGE_STYLE,
+    onAfterPrint: () => {
+      pendingPrintRenderResolveRef.current = null;
+      setPreparedPrintNote(null);
+    },
     onPrintError: (_location, error) => {
+      pendingPrintRenderResolveRef.current = null;
+      setPreparedPrintNote(null);
       const message = error instanceof Error ? error.message : 'No se pudo abrir el dialogo de impresion.';
       reportError(message);
     },
@@ -393,6 +559,54 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
   }, [activeNoteId]);
 
   useEffect(() => {
+    let cancelled = false;
+    const objectUrls: string[] = [];
+
+    const loadInlineImagePreviews = async () => {
+      if (!activeNote || !onReadAttachmentBlob || inlineImageRefs.length === 0) {
+        setInlineImagePreviewMap({});
+        return;
+      }
+
+      const attachments = activeNote.attachments || [];
+      const previewEntries = await Promise.all(uniqueInlineImageRefs.map(async (ref) => {
+        const attachment = attachments.find((item) => item.id === ref.attachmentId && item.kind === 'inline-image');
+        if (!attachment) return null;
+        const blobId = attachment.previewAttachmentId || attachment.id;
+        const blob = await onReadAttachmentBlob(blobId);
+        if (!blob) return null;
+        const objectUrl = URL.createObjectURL(blob);
+        objectUrls.push(objectUrl);
+        return [
+          attachment.id,
+          {
+            id: attachment.id,
+            alt: attachment.alt || ref.alt || attachment.name || 'imagen',
+            dataUrl: objectUrl,
+            mimeType: blob.type || attachment.mimeType,
+            width: attachment.width,
+            height: attachment.height,
+          },
+        ] as const;
+      }));
+
+      if (cancelled) return;
+      setInlineImagePreviewMap(
+        Object.fromEntries(
+          previewEntries.filter((entry): entry is readonly [string, NoteInlineImageAsset] => !!entry)
+        )
+      );
+    };
+
+    void loadInlineImagePreviews();
+
+    return () => {
+      cancelled = true;
+      objectUrls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [activeNote, inlineImagePreviewSignature, onReadAttachmentBlob, uniqueInlineImageRefs]);
+
+  useEffect(() => {
     if (!openNoteId) return;
     const requestedNoteId = openNoteId;
     onConsumeOpenNoteId?.();
@@ -440,17 +654,29 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
     void openRequestedNote();
   }, [openNoteId, notes, folderMap, unlockedFolderIds, onConsumeOpenNoteId]);
 
-  const persistDraft = async () => {
+  const persistDraft = async (overrides?: {
+    content?: string;
+    attachments?: AttachmentMeta[] | undefined;
+    title?: string;
+    contentFormat?: NoteContentFormat;
+    tags?: string;
+  }) => {
     if (!activeNote) return;
     if (isNoteLocked) return;
     setSaving(true);
     try {
-      const tags = normalizeTags(draftTags);
+      const nextTitle = overrides?.title ?? draftTitle;
+      const nextContent = overrides?.content ?? draftContent;
+      const nextContentFormat = overrides?.contentFormat ?? draftContentFormat;
+      const nextTagsValue = overrides?.tags ?? draftTags;
+      const nextAttachments = overrides?.attachments ?? activeNote.attachments;
+      const tags = normalizeTags(nextTagsValue);
       const baseUpdate: NoteDoc = {
         ...activeNote,
-        title: draftTitle.trim() || 'Untitled',
-        contentFormat: draftContentFormat,
+        title: nextTitle.trim() || 'Untitled',
+        contentFormat: nextContentFormat,
         tags,
+        attachments: nextAttachments,
         updatedAt: Date.now(),
       };
 
@@ -460,7 +686,7 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
           setLocalError('No se encontro clave para cifrar.');
           return;
         }
-        const { cipherText, iv } = await encryptWithKey(draftContent, key);
+        const { cipherText, iv } = await encryptWithKey(nextContent, key);
         const lockedUpdate: NoteDoc = {
           ...baseUpdate,
           locked: true,
@@ -472,7 +698,7 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
       } else {
         const unlockedUpdate: NoteDoc = {
           ...baseUpdate,
-          content: draftContent,
+          content: nextContent,
           encryptedContent: undefined,
           iv: undefined,
           salt: undefined,
@@ -482,10 +708,167 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
         };
         await onUpdateNote(unlockedUpdate);
       }
+
     } finally {
       setSaving(false);
     }
   };
+
+  const focusEditorAt = useCallback((position: number) => {
+    window.requestAnimationFrame(() => {
+      const editor = editorTextareaRef.current;
+      if (!editor) return;
+      editor.focus();
+      editor.setSelectionRange(position, position);
+    });
+  }, []);
+
+  const insertInlineImages = useCallback(async (
+    files: File[],
+    source: InlineImageInsertSource,
+    selectionStart?: number,
+    selectionEnd?: number
+  ) => {
+    if (!activeNote) return;
+    const imageFiles = files.filter((file) => file.type.startsWith('image/'));
+    if (imageFiles.length === 0) return;
+
+    if (!canUseInlineImages || !onPrepareInlineNoteImages) {
+      reportError('Las imagenes inline requieren Markdown y PDF externo configurado.');
+      return;
+    }
+
+    setInlineImageBusy(true);
+    setLocalError(null);
+    try {
+      const preparedAttachments = await onPrepareInlineNoteImages(activeNote.id, imageFiles, source);
+      if (preparedAttachments.length === 0) return;
+
+      const editor = editorTextareaRef.current;
+      const start = selectionStart ?? editor?.selectionStart ?? draftContent.length;
+      const end = selectionEnd ?? editor?.selectionEnd ?? start;
+      const { nextContent, nextSelection } = insertInlineImageTokensAtSelection({
+        content: draftContent,
+        selectionStart: start,
+        selectionEnd: end,
+        attachments: preparedAttachments,
+      });
+
+      const nextAttachments = [...(activeNote.attachments || []), ...preparedAttachments];
+      setDraftContent(nextContent);
+      await persistDraft({
+        content: nextContent,
+        attachments: nextAttachments,
+      });
+      focusEditorAt(nextSelection);
+      reportSuccess(`${preparedAttachments.length} imagen(es) insertada(s) en la nota.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudieron insertar las imagenes.';
+      reportError(message);
+    } finally {
+      setInlineImageBusy(false);
+      if (inlineImageInputRef.current) {
+        inlineImageInputRef.current.value = '';
+      }
+    }
+  }, [
+    activeNote,
+    canUseInlineImages,
+    draftContent,
+    focusEditorAt,
+    onPrepareInlineNoteImages,
+    persistDraft,
+    reportError,
+    reportSuccess,
+  ]);
+
+  const handleInlineImagePickerChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || []);
+    void insertInlineImages(files, 'picker');
+  };
+
+  const handleEditorPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const imageFiles = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => !!file);
+
+    if (imageFiles.length === 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void insertInlineImages(
+      imageFiles,
+      'paste',
+      event.currentTarget.selectionStart,
+      event.currentTarget.selectionEnd
+    );
+  };
+
+  const handleEditorDragOverCapture = (event: React.DragEvent<HTMLDivElement>) => {
+    const imageFiles = Array.from(event.dataTransfer.files || []).filter((file) => file.type.startsWith('image/'));
+    if (imageFiles.length === 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  const handleEditorDropCapture = (event: React.DragEvent<HTMLDivElement>) => {
+    const imageFiles = Array.from(event.dataTransfer.files || []).filter((file) => file.type.startsWith('image/'));
+    if (imageFiles.length === 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const nativeEvent = event.nativeEvent as DragEvent;
+    nativeEvent.stopImmediatePropagation?.();
+    void insertInlineImages(
+      imageFiles,
+      'drop',
+      editorTextareaRef.current?.selectionStart,
+      editorTextareaRef.current?.selectionEnd
+    );
+  };
+
+  const handleRemoveInlineImage = useCallback(async (attachmentId: string) => {
+    if (!activeNote) return;
+
+    const nextContent = removeInlineImageTokenByAttachmentId(draftContent, attachmentId);
+    const nextAttachments = (activeNote.attachments || []).filter((attachment) => attachment.id !== attachmentId);
+    setDraftContent(nextContent);
+
+    try {
+      await persistDraft({
+        content: nextContent,
+        attachments: nextAttachments,
+      });
+      await onDeleteNoteAttachment?.(activeNote.id, attachmentId);
+      reportSuccess('Imagen inline eliminada.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo quitar la imagen inline.';
+      reportError(message);
+    }
+  }, [activeNote, draftContent, onDeleteNoteAttachment, persistDraft, reportError, reportSuccess]);
+
+  const handleRestoreInlineImage = useCallback(async (attachment: AttachmentMeta) => {
+    if (!activeNote) return;
+
+    const editor = editorTextareaRef.current;
+    const start = editor?.selectionStart ?? draftContent.length;
+    const end = editor?.selectionEnd ?? start;
+    const { nextContent, nextSelection } = insertInlineImageTokensAtSelection({
+      content: draftContent,
+      selectionStart: start,
+      selectionEnd: end,
+      attachments: [attachment],
+    });
+
+    setDraftContent(nextContent);
+    try {
+      await persistDraft({ content: nextContent });
+      focusEditorAt(nextSelection);
+      reportSuccess('Imagen inline reinsertada en el documento.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo reinsertar la imagen inline.';
+      reportError(message);
+    }
+  }, [activeNote, draftContent, focusEditorAt, persistDraft, reportError, reportSuccess]);
 
   useEffect(() => {
     const handleSaveShortcut = (event: KeyboardEvent) => {
@@ -706,6 +1089,11 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
     const noteToExport = getExportableNote();
     if (!noteToExport) return;
 
+    if (mode === 'offline-browser' && containsInlineImages) {
+      reportError('Las imagenes inline solo se exportan con PDF alta fidelidad por ahora.');
+      return;
+    }
+
     if (mode === 'external-chromium' && !externalExporterConfigured) {
       reportError('Configura VITE_PDF_EXPORT_API_URL para usar PDF alta fidelidad.');
       return;
@@ -721,9 +1109,15 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
     }
 
     try {
+      const hydratedNote = await hydratePrintableNoteForExport(noteToExport, {
+        includeInlineImages: mode === 'external-chromium',
+      });
+      if (mode === 'offline-browser') {
+        await mountPreparedPrintNote(hydratedNote);
+      }
       await exportNotePdf({
         mode,
-        note: noteToExport,
+        note: hydratedNote,
         triggerPrint: triggerBrowserPrint,
       });
       if (mode === 'external-chromium') {
@@ -739,7 +1133,10 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
     }
   }, [
     externalExporterConfigured,
+    containsInlineImages,
     getExportableNote,
+    hydratePrintableNoteForExport,
+    mountPreparedPrintNote,
     persistPreferredExportMode,
     reportError,
     reportSuccess,
@@ -747,7 +1144,7 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
   ]);
 
   const handlePrimaryPdfExport = () => {
-    void runPdfExport(primaryExportMode);
+    void runPdfExport(effectivePrimaryExportMode);
   };
 
   const handlePdfExportChoice = (mode: PdfExportMode) => {
@@ -763,6 +1160,11 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
       const noteToExport = getExportableNote();
       if (!noteToExport) return;
 
+      if (containsInlineImages && externalExporterConfigured) {
+        void runPdfExport('external-chromium');
+        return;
+      }
+
       if (resolvedPreferredExportMode) {
         void runPdfExport(resolvedPreferredExportMode);
         return;
@@ -773,7 +1175,7 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
 
     window.addEventListener('keydown', handlePrintShortcut);
     return () => window.removeEventListener('keydown', handlePrintShortcut);
-  }, [activeNote, getExportableNote, resolvedPreferredExportMode, runPdfExport]);
+  }, [activeNote, containsInlineImages, externalExporterConfigured, getExportableNote, resolvedPreferredExportMode, runPdfExport]);
 
   const handleLockFolder = async () => {
     if (!activeFolder) return;
@@ -1354,13 +1756,13 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
                       </div>
                     </div>
                   )}
-                  {activeNote.attachments && activeNote.attachments.length > 0 && (
+                  {visibleNoteAttachments.length > 0 && (
                     <div className="mb-3 p-2 bg-slate-900/50 border border-slate-700 rounded-lg">
                       <p className="text-[11px] uppercase tracking-wider text-slate-500 mb-2">
                         Adjuntos
                       </p>
                       <div className="flex flex-wrap gap-2">
-                        {activeNote.attachments.map((attachment) => (
+                        {visibleNoteAttachments.map((attachment) => (
                           <div
                             key={attachment.id}
                             className="flex items-center gap-1 bg-slate-700/50 rounded-lg px-2 py-1 text-xs text-slate-300 group"
@@ -1387,6 +1789,11 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
                           </div>
                         ))}
                       </div>
+                      {textAppendixCandidates.length > 0 && (
+                        <p className="mt-2 text-[11px] text-sky-300">
+                          Los archivos `.txt` se agregan al final del PDF como anexos de texto.
+                        </p>
+                      )}
                     </div>
                   )}
                   <div className="mb-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
@@ -1409,14 +1816,127 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
                       Markdown mejora headings, listas y links en el PDF.
                     </p>
                   </div>
-                  <textarea
-                    ref={editorTextareaRef}
-                    value={draftContent}
-                    onChange={(e) => setDraftContent(e.target.value)}
-                    placeholder={isNoteLocked ? 'Documento bloqueado' : 'Escribe aqui...'}
-                    className={`flex-1 ${isEditorWide ? 'min-h-[70vh]' : 'min-h-[240px]'} bg-slate-950 border border-slate-800 rounded p-3 text-sm text-slate-100 focus:outline-none focus:border-indigo-500 resize-none`}
-                    disabled={isNoteLocked}
-                  />
+                  {draftContentFormat === 'markdown' && (
+                    <div className="mb-3 rounded-xl border border-slate-800 bg-slate-950/70 p-3 space-y-2">
+                      <input
+                        ref={inlineImageInputRef}
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        multiple
+                        className="hidden"
+                        onChange={handleInlineImagePickerChange}
+                      />
+                      <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                        <div>
+                          <p className="text-[11px] uppercase tracking-wider text-slate-500">Imagenes inline</p>
+                          <p className="text-[11px] text-slate-500">
+                            Se guardan en original para IA y con preview ligero para esta vista.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => inlineImageInputRef.current?.click()}
+                          disabled={!canUseInlineImages || inlineImageBusy}
+                          className="px-3 py-2 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-100 border border-indigo-500/30 text-xs disabled:opacity-50"
+                        >
+                          {inlineImageBusy ? 'Insertando...' : 'Insertar imagen'}
+                        </button>
+                      </div>
+                      <p className="text-[11px] text-slate-500">
+                        {canUseInlineImages
+                          ? 'Puedes pegar con Ctrl+V, arrastrar al editor o elegir archivos.'
+                          : 'Las imagenes inline solo estan disponibles en Markdown con PDF alta fidelidad configurado.'}
+                      </p>
+                    </div>
+                  )}
+                  {draftContentFormat === 'markdown' && orphanInlineAttachments.length > 0 && (
+                    <div className="mb-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3">
+                      <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                        <div>
+                          <p className="text-[11px] uppercase tracking-wider text-amber-200">Imagenes inline sin referencia</p>
+                          <p className="text-[11px] text-amber-100/80">
+                            Se conservaron para evitar perdida de datos. Puedes reinsertarlas o borrarlas manualmente.
+                          </p>
+                        </div>
+                        <p className="text-[11px] text-amber-100/80">
+                          {orphanInlineAttachments.length} pendiente(s)
+                        </p>
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {orphanInlineAttachments.map((attachment) => (
+                          <div
+                            key={attachment.id}
+                            className="flex items-center gap-2 rounded-lg border border-amber-400/20 bg-slate-950/50 px-2 py-1 text-xs text-amber-50"
+                          >
+                            <span className="max-w-[180px] truncate">{attachment.name}</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void handleRestoreInlineImage(attachment);
+                              }}
+                              disabled={!canUseInlineImages}
+                              className="rounded bg-amber-500/20 px-2 py-1 text-[11px] text-amber-100 hover:bg-amber-500/30 disabled:opacity-50"
+                            >
+                              Reinsertar
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void handleRemoveInlineImage(attachment.id);
+                              }}
+                              disabled={isNoteLocked}
+                              className="rounded bg-rose-500/15 px-2 py-1 text-[11px] text-rose-200 hover:bg-rose-500/25 disabled:opacity-50"
+                            >
+                              Borrar
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <div
+                    className="flex-1"
+                    onDragOverCapture={handleEditorDragOverCapture}
+                    onDropCapture={handleEditorDropCapture}
+                  >
+                    <textarea
+                      ref={editorTextareaRef}
+                      value={draftContent}
+                      onChange={(e) => setDraftContent(e.target.value)}
+                      onPaste={handleEditorPaste}
+                      placeholder={isNoteLocked ? 'Documento bloqueado' : 'Escribe aqui...'}
+                      className={`w-full ${isEditorWide ? 'min-h-[70vh]' : 'min-h-[240px]'} bg-slate-950 border border-slate-800 rounded p-3 text-sm text-slate-100 focus:outline-none focus:border-indigo-500 resize-none`}
+                      disabled={isNoteLocked}
+                    />
+                  </div>
+                  {draftContentFormat === 'markdown' && (
+                    <div className="mt-3 rounded-xl border border-slate-800 bg-slate-900/50 p-4">
+                      <div className="mb-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                        <div>
+                          <p className="text-xs uppercase tracking-wider text-slate-500">Vista previa Markdown</p>
+                          <p className="text-[11px] text-slate-500">
+                            Asi se vera el documento con texto e imagenes inline.
+                          </p>
+                        </div>
+                        <p className="text-[11px] text-slate-500">
+                          {containsInlineImages
+                            ? 'Si hay imagenes inline, el PDF usara el motor externo.'
+                            : 'Sin imagenes inline, puedes seguir exportando normal.'}
+                        </p>
+                      </div>
+                      <NoteMarkdownPreview
+                        content={draftContent}
+                        imageSources={inlineImagePreviewMap}
+                        onRemoveImage={
+                          canUseInlineImages
+                            ? (attachmentId) => {
+                                void handleRemoveInlineImage(attachmentId);
+                              }
+                            : undefined
+                        }
+                      />
+                    </div>
+                  )}
                   <div className="mt-3">
                     <button
                       onClick={() => setIsOptionsOpen((prev) => !prev)}
@@ -1478,18 +1998,21 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
                               </button>
                             </div>
                             <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500">
-                              <span>Motor actual: {PDF_EXPORT_MODE_LABELS[primaryExportMode]}</span>
-                              <span>Ctrl+P / Cmd+P</span>
+                              <span>Motor actual: {PDF_EXPORT_MODE_LABELS[effectivePrimaryExportMode]}</span>
+                              <span>{containsInlineImages ? 'Imagenes inline: fuerza PDF alta fidelidad' : 'Ctrl+P / Cmd+P'}</span>
                             </div>
                             {isExportMenuOpen && (
                               <div className="absolute right-0 z-30 mt-2 w-72 rounded-lg border border-slate-700 bg-slate-950 shadow-xl">
                                 <button
                                   onClick={() => handlePdfExportChoice('offline-browser')}
-                                  className="w-full text-left px-3 py-3 hover:bg-slate-900 border-b border-slate-800"
+                                  disabled={containsInlineImages}
+                                  className="w-full text-left px-3 py-3 hover:bg-slate-900 border-b border-slate-800 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
                                 >
                                   <div className="text-sm text-slate-100">{PDF_EXPORT_MODE_LABELS['offline-browser']}</div>
                                   <div className="text-[11px] text-slate-500">
-                                    Texto seleccionable, links reales y print-to-PDF local.
+                                    {containsInlineImages
+                                      ? 'No disponible: esta nota usa imagenes inline.'
+                                      : 'Texto seleccionable, links reales y print-to-PDF local.'}
                                   </div>
                                 </button>
                                 <button
@@ -1507,9 +2030,24 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
                                     Configura `VITE_PDF_EXPORT_API_URL` para habilitar este modo.
                                   </p>
                                 )}
+                                {containsInlineImages && (
+                                  <p className="px-3 pb-3 text-[11px] text-sky-300">
+                                    Esta nota contiene imagenes inline. El PDF se exporta mejor con el motor externo.
+                                  </p>
+                                )}
+                                {textAppendixCandidates.length > 0 && (
+                                  <p className="px-3 pb-3 text-[11px] text-emerald-300">
+                                    Los adjuntos `.txt` se anexan al final del PDF.
+                                  </p>
+                                )}
                               </div>
                             )}
                           </div>
+                          {(activeNote.attachments || []).length > 0 && (
+                            <p className="text-[11px] text-amber-300">
+                              El bloqueo protege el texto de la nota, pero no cifra los adjuntos ya guardados en IndexedDB.
+                            </p>
+                          )}
                           {activeNote.locked ? (
                             <>
                               <input
@@ -1575,7 +2113,7 @@ export const NotesPanel: React.FC<NotesPanelProps> = ({
           <p className="mt-3 text-xs text-rose-400">{localError}</p>
         )}
       </section>
-      {printableNote && <NotePrintDocument ref={printDocumentRef} note={printableNote} />}
+      {printableDocumentNote && <NotePrintDocument ref={printDocumentRef} note={printableDocumentNote} />}
     </div>
   );
 };

@@ -1,5 +1,21 @@
 import { NoteContentFormat, PdfExportMode } from '../types';
 
+export interface PrintableNoteAsset {
+  id: string;
+  alt: string;
+  dataUrl: string;
+  mimeType: string;
+  width?: number;
+  height?: number;
+}
+
+export interface PrintableNoteAppendix {
+  id: string;
+  title: string;
+  text: string;
+  mimeType: 'text/plain';
+}
+
 export interface PrintableNotePayload {
   title: string;
   content: string;
@@ -8,6 +24,10 @@ export interface PrintableNotePayload {
   fileName: string;
   paper: 'A4';
   locale: string;
+  resolvedContent?: string;
+  assets?: PrintableNoteAsset[];
+  appendices?: PrintableNoteAppendix[];
+  containsInlineImages?: boolean;
 }
 
 const getExternalPdfExportUrl = () => (import.meta.env.VITE_PDF_EXPORT_API_URL || '').trim();
@@ -75,10 +95,14 @@ export const exportNotePdfExternal = async (note: PrintableNotePayload) => {
     body: JSON.stringify({
       title: note.title,
       content: note.content,
+      resolvedContent: note.resolvedContent || note.content,
       contentFormat: note.contentFormat,
       fileName: note.fileName,
       paper: note.paper,
       locale: note.locale,
+      assets: note.assets || [],
+      appendices: note.appendices || [],
+      containsInlineImages: note.containsInlineImages || false,
     }),
   });
 

@@ -2,6 +2,8 @@
 export type Priority = 'P1' | 'P2' | 'P3' | 'P4';
 export type NoteContentFormat = 'plain' | 'markdown';
 export type PdfExportMode = 'offline-browser' | 'external-chromium';
+export type AttachmentKind = 'file' | 'inline-image';
+export type InlineImageInsertSource = 'paste' | 'drop' | 'picker';
 
 export interface Subtask {
   id: string;
@@ -15,6 +17,12 @@ export interface AttachmentMeta {
   mimeType: string;
   size: number;
   createdAt: number;
+  kind?: AttachmentKind;
+  width?: number;
+  height?: number;
+  previewAttachmentId?: string;
+  alt?: string;
+  source?: InlineImageInsertSource;
 }
 
 export interface Todo {
