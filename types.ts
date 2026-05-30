@@ -121,3 +121,44 @@ export enum ViewMode {
 export interface AudioConfig {
   sampleRate: number;
 }
+
+export type SyncStoreName =
+  | 'todos'
+  | 'notes'
+  | 'note_folders'
+  | 'expenses'
+  | 'medicines'
+  | 'attachments';
+
+export type SyncAction = 'upsert' | 'delete';
+
+export type SyncQueueStatus = 'pending' | 'failed' | 'dead_letter';
+
+export interface SyncQueueItem {
+  id: string;
+  opId: string;
+  storeName: SyncStoreName;
+  entityId: string;
+  action: SyncAction;
+  payload?: Record<string, any>;
+  clientUpdatedAt: number;
+  createdAt: number;
+  attempts: number;
+  nextRetryAt: number;
+  status: SyncQueueStatus;
+  lastError?: string;
+}
+
+export interface SyncMetaItem {
+  key: string;
+  value: string;
+  updatedAt: number;
+}
+
+export interface SyncStatsSnapshot {
+  queueSize: number;
+  syncErrors: number;
+  lastSyncLatencyMs: number | null;
+  lastSyncAt: number | null;
+  lastError: string | null;
+}

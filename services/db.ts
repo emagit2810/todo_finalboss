@@ -1,5 +1,16 @@
 import { openDB, DBSchema, IDBPDatabase } from 'idb';
-import { Todo, Medicine, Expense, NoteDoc, NoteFolder, AppNotification } from '../types';
+import {
+  Todo,
+  Medicine,
+  Expense,
+  NoteDoc,
+  NoteFolder,
+  AppNotification,
+  SyncQueueItem,
+  SyncMetaItem,
+  SyncStoreName,
+  SyncAction,
+} from '../types';
 
 interface TaskMasterDB extends DBSchema {
   todos: {
@@ -42,13 +53,25 @@ interface TaskMasterDB extends DBSchema {
     key: string;
     value: { id: string; query: string; resultText: string; timestamp: number };
   };
+  sync_queue: {
+    key: string;
+    value: SyncQueueItem;
+  };
+  sync_meta: {
+    key: string;
+    value: SyncMetaItem;
+  };
 }
 
 const DB_NAME = 'gemini-task-master';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 
 type StoreName = keyof TaskMasterDB;
 type StoreValue<K extends StoreName> = TaskMasterDB[K]['value'];
+
+export type DbWriteOptions = {
+  skipSyncQueue?: boolean;
+};
 
 let dbPromise: Promise<IDBPDatabase<TaskMasterDB> | null> | null = null;
 let dbFailed = false;
@@ -56,6 +79,14 @@ let fallbackWarned = false;
 
 const FALLBACK_PREFIX = `tm_fallback:${DB_NAME}:`;
 const memoryFallback = new Map<string, string>();
+
+const SYNCABLE_STORE_NAMES = new Set<StoreName>([
+  'todos',
+  'notes',
+  'note_folders',
+  'expenses',
+  'medicines',
+]);
 
 const warnFallbackOnce = (error: unknown) => {
   if (fallbackWarned) return;
@@ -105,10 +136,18 @@ const fallbackGetAll = <K extends StoreName>(storeName: K): StoreValue<K>[] => {
   return Object.values(readStore(storeName));
 };
 
+const resolveFallbackKey = <K extends StoreName>(item: StoreValue<K>) => {
+  const keyFromId = (item as { id?: string }).id;
+  if (keyFromId) return keyFromId;
+  const keyFromKey = (item as { key?: string }).key;
+  if (keyFromKey) return keyFromKey;
+  return crypto.randomUUID();
+};
+
 const fallbackPutItem = <K extends StoreName>(storeName: K, item: StoreValue<K>) => {
   const data = readStore(storeName);
-  const key = (item as { id?: string }).id || crypto.randomUUID();
-  data[key] = { ...(item as StoreValue<K>), id: key };
+  const key = resolveFallbackKey(item);
+  data[key] = { ...(item as StoreValue<K>) };
   writeStore(storeName, data);
   return key;
 };
@@ -122,6 +161,44 @@ const fallbackDeleteItem = <K extends StoreName>(storeName: K, id: string) => {
     safeRemoveItem(`${FALLBACK_PREFIX}${storeName}`);
     writeStore(storeName, data);
   }
+};
+
+const toSyncStoreName = (storeName: StoreName): SyncStoreName | null => {
+  if (storeName === 'todos') return 'todos';
+  if (storeName === 'notes') return 'notes';
+  if (storeName === 'note_folders') return 'note_folders';
+  if (storeName === 'expenses') return 'expenses';
+  if (storeName === 'medicines') return 'medicines';
+  return null;
+};
+
+const shouldQueueSync = (storeName: StoreName, options?: DbWriteOptions) => {
+  if (options?.skipSyncQueue) return false;
+  return SYNCABLE_STORE_NAMES.has(storeName);
+};
+
+const enqueueSyncOperation = async (
+  storeName: SyncStoreName,
+  entityId: string,
+  action: SyncAction,
+  payload?: Record<string, any>,
+  clientUpdatedAt = Date.now()
+) => {
+  const now = Date.now();
+  const item: SyncQueueItem = {
+    id: crypto.randomUUID(),
+    opId: crypto.randomUUID(),
+    storeName,
+    entityId,
+    action,
+    payload,
+    clientUpdatedAt,
+    createdAt: now,
+    attempts: 0,
+    nextRetryAt: now,
+    status: 'pending',
+  };
+  await putItem('sync_queue', item, { skipSyncQueue: true });
 };
 
 export const initDB = () => {
@@ -158,6 +235,12 @@ export const initDB = () => {
         if (!db.objectStoreNames.contains('ai_planner_results')) {
           db.createObjectStore('ai_planner_results', { keyPath: 'id' });
         }
+        if (!db.objectStoreNames.contains('sync_queue')) {
+          db.createObjectStore('sync_queue', { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains('sync_meta')) {
+          db.createObjectStore('sync_meta', { keyPath: 'key' });
+        }
       },
     }).catch((error) => {
       dbFailed = true;
@@ -167,8 +250,6 @@ export const initDB = () => {
   }
   return dbPromise;
 };
-
-// --- Generic Helpers ---
 
 export const getAll = async <K extends StoreName>(storeName: K): Promise<StoreValue<K>[]> => {
   const db = await initDB();
@@ -184,67 +265,92 @@ export const getAll = async <K extends StoreName>(storeName: K): Promise<StoreVa
   }
 };
 
-export const putItem = async <K extends StoreName>(storeName: K, item: StoreValue<K>) => {
+export const putItem = async <K extends StoreName>(
+  storeName: K,
+  item: StoreValue<K>,
+  options?: DbWriteOptions
+) => {
   const db = await initDB();
+  const key = resolveFallbackKey(item);
+
   if (!db) {
-    return fallbackPutItem(storeName, item);
-  }
-  try {
-    return await db.put(storeName as any, item);
-  } catch (error) {
-    dbFailed = true;
-    warnFallbackOnce(error);
-    return fallbackPutItem(storeName, item);
-  }
-};
-
-export const deleteItem = async <K extends StoreName>(storeName: K, id: string) => {
-  const db = await initDB();
-  if (!db) {
-    fallbackDeleteItem(storeName, id);
-    return;
-  }
-  try {
-    await db.delete(storeName as any, id);
-  } catch (error) {
-    dbFailed = true;
-    warnFallbackOnce(error);
-    fallbackDeleteItem(storeName, id);
-  }
-};
-
-// --- Specific Logic (if needed) ---
-
-export const softDeleteTodo = async (todo: Todo) => {
-    const db = await initDB();
-    if (!db) {
-        const todos = readStore('todos');
-        const deleted = readStore('deleted_todos');
-        if (todos[todo.id]) {
-            delete todos[todo.id];
-            writeStore('todos', todos);
-        }
-        deleted[todo.id] = todo;
-        writeStore('deleted_todos', deleted);
-        return;
-    }
+    fallbackPutItem(storeName, item);
+  } else {
     try {
-        const tx = db.transaction(['todos', 'deleted_todos'], 'readwrite');
-        await tx.objectStore('todos').delete(todo.id);
-        await tx.objectStore('deleted_todos').put(todo);
-        return tx.done;
+      await db.put(storeName as any, item);
     } catch (error) {
-        dbFailed = true;
-        warnFallbackOnce(error);
-        const todos = readStore('todos');
-        const deleted = readStore('deleted_todos');
-        if (todos[todo.id]) {
-            delete todos[todo.id];
-            writeStore('todos', todos);
-        }
-        deleted[todo.id] = todo;
-        writeStore('deleted_todos', deleted);
+      dbFailed = true;
+      warnFallbackOnce(error);
+      fallbackPutItem(storeName, item);
     }
+  }
+
+  if (shouldQueueSync(storeName, options)) {
+    const syncStoreName = toSyncStoreName(storeName);
+    if (syncStoreName) {
+      await enqueueSyncOperation(syncStoreName, key, 'upsert', item as Record<string, any>, Date.now());
+    }
+  }
+
+  return key;
+};
+
+export const deleteItem = async <K extends StoreName>(storeName: K, id: string, options?: DbWriteOptions) => {
+  const db = await initDB();
+  if (!db) {
+    fallbackDeleteItem(storeName, id);
+  } else {
+    try {
+      await db.delete(storeName as any, id);
+    } catch (error) {
+      dbFailed = true;
+      warnFallbackOnce(error);
+      fallbackDeleteItem(storeName, id);
+    }
+  }
+
+  if (shouldQueueSync(storeName, options)) {
+    const syncStoreName = toSyncStoreName(storeName);
+    if (syncStoreName) {
+      await enqueueSyncOperation(syncStoreName, id, 'delete', undefined, Date.now());
+    }
+  }
+};
+
+export const softDeleteTodo = async (todo: Todo, options?: DbWriteOptions) => {
+  const db = await initDB();
+  if (!db) {
+    const todos = readStore('todos');
+    const deleted = readStore('deleted_todos');
+    if (todos[todo.id]) {
+      delete todos[todo.id];
+      writeStore('todos', todos);
+    }
+    deleted[todo.id] = todo;
+    writeStore('deleted_todos', deleted);
+  } else {
+    try {
+      const tx = db.transaction(['todos', 'deleted_todos'], 'readwrite');
+      await tx.objectStore('todos').delete(todo.id);
+      await tx.objectStore('deleted_todos').put(todo);
+      await tx.done;
+    } catch (error) {
+      dbFailed = true;
+      warnFallbackOnce(error);
+      const todos = readStore('todos');
+      const deleted = readStore('deleted_todos');
+      if (todos[todo.id]) {
+        delete todos[todo.id];
+        writeStore('todos', todos);
+      }
+      deleted[todo.id] = todo;
+      writeStore('deleted_todos', deleted);
+    }
+  }
+
+  if (!options?.skipSyncQueue) {
+    await enqueueSyncOperation('todos', todo.id, 'delete', undefined, Date.now());
+  }
 };
 
 export const saveAIResult = async (query: string, resultText: string) => {
@@ -270,7 +376,7 @@ export const saveAIResult = async (query: string, resultText: string) => {
 
 const ATTACHMENT_DB_UNAVAILABLE = 'IndexedDB no disponible para guardar adjuntos.';
 
-export const putAttachmentBlob = async (id: string, blob: Blob) => {
+export const putAttachmentBlob = async (id: string, blob: Blob, options?: DbWriteOptions) => {
   const db = await initDB();
   if (!db) {
     throw new Error(ATTACHMENT_DB_UNAVAILABLE);
@@ -291,10 +397,35 @@ export const getAttachmentBlob = async (id: string): Promise<Blob | null> => {
   return record?.blob || null;
 };
 
-export const deleteAttachmentBlob = async (id: string) => {
+export const deleteAttachmentBlob = async (id: string, options?: DbWriteOptions) => {
   const db = await initDB();
   if (!db) {
     throw new Error(ATTACHMENT_DB_UNAVAILABLE);
   }
   await db.delete('attachments', id);
+};
+
+export const listPendingSyncQueue = async () => {
+  const items = await getAll('sync_queue');
+  return items
+    .filter((item) => item.status === 'pending' || item.status === 'failed')
+    .sort((a, b) => a.createdAt - b.createdAt);
+};
+
+export const putSyncQueueItem = async (item: SyncQueueItem) => {
+  return putItem('sync_queue', item, { skipSyncQueue: true });
+};
+
+export const deleteSyncQueueItem = async (id: string) => {
+  return deleteItem('sync_queue', id, { skipSyncQueue: true });
+};
+
+export const getSyncMeta = async (key: string): Promise<string | null> => {
+  const allMeta = await getAll('sync_meta');
+  const found = allMeta.find((item) => item.key === key);
+  return found?.value ?? null;
+};
+
+export const setSyncMeta = async (key: string, value: string) => {
+  return putItem('sync_meta', { key, value, updatedAt: Date.now() }, { skipSyncQueue: true });
 };

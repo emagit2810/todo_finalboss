@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Todo, ViewMode, Medicine, Expense, Priority, Subtask, NoteDoc, NoteFolder, AppNotification, AttachmentMeta, InlineImageInsertSource } from './types';
+import { Todo, ViewMode, Medicine, Expense, Priority, Subtask, NoteDoc, NoteFolder, AppNotification, AttachmentMeta, InlineImageInsertSource, SyncStoreName } from './types';
 import { TodoItem } from './components/TodoItem';
 import { brainstormTasks } from './services/geminiService';
 import { PlusIcon, BrainIcon, ArrowsExpandIcon, ArrowsCollapseIcon, FlagIcon, BellIcon, ClockIcon, DocumentIcon, XMarkIcon } from './components/Icons';
@@ -12,6 +12,7 @@ import { Sidebar } from './components/Sidebar';
 import * as db from './services/db';
 import { sendReminder, sendDailyTopNow, tryOpenWhatsAppLink, syncDailyTopSnapshot, type DailyTopTaskSnapshot } from './services/reminderService';
 import { wakeServices, type WakeBatchResult, type WakeTrigger } from './services/serviceWakeService';
+import { forceSyncNow, getSyncStatsSnapshot, SYNC_INTERVAL_MS } from './services/backendSyncService';
 import { Toast } from './components/Toast';
 import { VoiceDictation } from './components/VoiceDictation';
 import { buildMedicineAlerts } from './utils/medicineAlerts';
@@ -282,6 +283,9 @@ function App() {
   const [wakeInFlight, setWakeInFlight] = useState(false);
   const wakeInFlightRef = useRef(false);
   const [wakeHistory, setWakeHistory] = useState<WakeBatchResult[]>([]);
+  const [syncInFlight, setSyncInFlight] = useState(false);
+  const syncInFlightRef = useRef(false);
+  const [syncStats, setSyncStats] = useState(getSyncStatsSnapshot());
   const [nextAutoWakeAt, setNextAutoWakeAt] = useState<number | null>(null);
   const [autoWakeEnabled, setAutoWakeEnabled] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
@@ -395,6 +399,70 @@ function App() {
     };
     loadData();
   }, []);
+
+  const applyRemoteStoreChanges = useCallback(async (changedStores: Set<SyncStoreName>) => {
+    if (!changedStores || changedStores.size === 0) return;
+
+    if (changedStores.has('todos')) {
+      const loadedTodos = await db.getAll('todos');
+      setTodos(loadedTodos.sort((a, b) => b.createdAt - a.createdAt));
+    }
+
+    if (changedStores.has('medicines')) {
+      const loadedMedicines = await db.getAll('medicines');
+      setMedicines(loadedMedicines);
+    }
+
+    if (changedStores.has('expenses')) {
+      const loadedExpenses = await db.getAll('expenses');
+      setExpenses(loadedExpenses);
+    }
+
+    if (changedStores.has('note_folders')) {
+      const loadedFolders = await db.getAll('note_folders');
+      setNoteFolders(loadedFolders);
+    }
+
+    if (changedStores.has('notes')) {
+      const loadedNotes = (await db.getAll('notes')).map((note) => ({
+        ...note,
+        contentFormat: normalizeNoteContentFormat(note.contentFormat),
+      }));
+      setNotes(loadedNotes.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)));
+    }
+  }, []);
+
+  const runSyncCycle = useCallback(async (reason: string) => {
+    if (syncInFlightRef.current) return;
+    syncInFlightRef.current = true;
+    setSyncInFlight(true);
+    try {
+      const result = await forceSyncNow(reason);
+      setSyncStats(result.stats);
+      await applyRemoteStoreChanges(result.changedStores);
+    } catch (error) {
+      console.error('Sync cycle failed:', error);
+      setSyncStats(getSyncStatsSnapshot());
+    } finally {
+      syncInFlightRef.current = false;
+      setSyncInFlight(false);
+    }
+  }, [applyRemoteStoreChanges]);
+
+  useEffect(() => {
+    void runSyncCycle('startup');
+    const intervalId = window.setInterval(() => {
+      void runSyncCycle('interval');
+    }, SYNC_INTERVAL_MS);
+    const onOnline = () => {
+      void runSyncCycle('online');
+    };
+    window.addEventListener('online', onOnline);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('online', onOnline);
+    };
+  }, [runSyncCycle]);
 
   // --- Handlers: Todos ---
   const addTodo = useCallback(async (
@@ -2142,6 +2210,14 @@ function App() {
               {wakeInFlight ? 'Despertando...' : 'Despertar servicio'}
             </button>
             <button
+              onClick={() => void runSyncCycle('manual_button')}
+              disabled={syncInFlight}
+              className="px-3 py-2 rounded-lg bg-indigo-700 text-white hover:bg-indigo-600 disabled:opacity-60 disabled:cursor-not-allowed text-xs sm:text-sm"
+              title="Sincronizar IndexedDB con backend y Neon"
+            >
+              {syncInFlight ? 'Sync...' : 'Sync ahora'}
+            </button>
+            <button
               onClick={() => setIsServicePanelOpen(prev => !prev)}
               className="px-2 py-2 rounded-lg bg-slate-900/80 border border-slate-800 text-slate-200 hover:bg-slate-800 text-xs"
               title="Abrir panel de servicio"
@@ -2188,6 +2264,26 @@ function App() {
               <p className="mt-2 text-[10px] text-slate-500">
                 Modo no-cors: "enviado" confirma dispatch, no estado HTTP de healthz.
               </p>
+
+              <div className="mt-2 rounded-lg border border-slate-800 bg-slate-950/40 p-2 text-xs text-slate-400">
+                <p>
+                  Sync backend/Neon: <span className="text-slate-200">{syncInFlight ? 'running' : 'idle'}</span>
+                </p>
+                <p>
+                  queue_size: <span className="text-slate-200">{syncStats.queueSize}</span>
+                </p>
+                <p>
+                  sync_errors: <span className="text-slate-200">{syncStats.syncErrors}</span>
+                </p>
+                <p>
+                  sync_latency: <span className="text-slate-200">{syncStats.lastSyncLatencyMs ?? '-'}ms</span>
+                </p>
+                {syncStats.lastError && (
+                  <p className="text-rose-300 break-words">
+                    last_error: {syncStats.lastError}
+                  </p>
+                )}
+              </div>
 
               <div className="mt-3 max-h-56 overflow-y-auto space-y-2">
                 {wakeHistory.length === 0 && (
