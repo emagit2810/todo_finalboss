@@ -1,9 +1,8 @@
 // Safely access environment variables to prevent crashes if import.meta.env is undefined
 
 // Updated to the specific API URL provided
-const API_URL = (import.meta as any)?.env?.VITE_API_URL || 'https://fast-api-v.onrender.com';
-// Updated to the specific Bearer Token provided
-const API_BEARER_TOKEN = (import.meta as any)?.env?.VITE_API_BEARER_TOKEN || 's3cr3t-Xjd94jf2kLl';
+const API_URL = (import.meta as any)?.env?.VITE_API_URL || 'https://fast-api-v-r6s0.onrender.com';
+const API_BEARER_TOKEN = (import.meta as any)?.env?.VITE_API_BEARER_TOKEN || '';
 
 interface ReminderResponse {
   success: boolean;
@@ -38,6 +37,10 @@ export const sendReminder = async (
   console.log(`[ReminderService] Sending to ${API_URL}/reminder: "${text}"`, contextData);
 
   try {
+    if (!API_BEARER_TOKEN) {
+      throw new Error('Missing VITE_API_BEARER_TOKEN');
+    }
+
     // CAMBIO 2: Usar la estructura exacta que espera ReminderIn en main.py
     const body = {
       text,
@@ -96,6 +99,10 @@ export const syncDailyTopSnapshot = async (
   top5: DailyTopTaskSnapshot[],
   timezone = 'America/Bogota'
 ): Promise<DailyTopSyncResponse> => {
+  if (!API_BEARER_TOKEN) {
+    throw new Error('Missing VITE_API_BEARER_TOKEN');
+  }
+
   const body = {
     top5: (top5 || []).slice(0, 5),
     timezone,
@@ -120,6 +127,10 @@ export const syncDailyTopSnapshot = async (
 };
 
 export const sendDailyTopNow = async (): Promise<{ ok: boolean; status: string; date: string }> => {
+  if (!API_BEARER_TOKEN) {
+    throw new Error('Missing VITE_API_BEARER_TOKEN');
+  }
+
   const res = await fetch(`${API_URL}/v1/daily-top/send-now`, {
     method: 'POST',
     headers: {

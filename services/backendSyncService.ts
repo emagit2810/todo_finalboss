@@ -8,6 +8,8 @@ const BOOTSTRAP_META_KEY = 'backend_bootstrap_v1_done';
 const DEFAULT_SYNC_INTERVAL_MS = 30_000;
 const DEFAULT_MAX_RETRIES = 5;
 const DEFAULT_LINEAR_RETRY_MS = 10_000;
+const DEFAULT_SYNC_HTTP_TIMEOUT_MS = 12_000;
+const DEFAULT_SYNC_API_URL = 'https://fast-api-v-r6s0.onrender.com';
 
 const parsePositiveInt = (raw: string | undefined, fallback: number) => {
   if (!raw) return fallback;
@@ -19,14 +21,13 @@ const parsePositiveInt = (raw: string | undefined, fallback: number) => {
 const trimTrailingSlash = (value: string) => value.replace(/\/+$/, '');
 
 const API_BASE_URL = trimTrailingSlash(
-  import.meta.env.VITE_SYNC_API_URL?.trim() ||
-    import.meta.env.VITE_API_URL?.trim() ||
-    ''
+  import.meta.env.VITE_SYNC_API_URL?.trim() || DEFAULT_SYNC_API_URL
 );
 
 export const SYNC_INTERVAL_MS = parsePositiveInt(import.meta.env.VITE_SYNC_INTERVAL_MS, DEFAULT_SYNC_INTERVAL_MS);
 const SYNC_MAX_RETRIES = parsePositiveInt(import.meta.env.VITE_SYNC_MAX_RETRIES, DEFAULT_MAX_RETRIES);
 const SYNC_LINEAR_RETRY_MS = parsePositiveInt(import.meta.env.VITE_SYNC_LINEAR_RETRY_MS, DEFAULT_LINEAR_RETRY_MS);
+const SYNC_HTTP_TIMEOUT_MS = parsePositiveInt(import.meta.env.VITE_SYNC_HTTP_TIMEOUT_MS, DEFAULT_SYNC_HTTP_TIMEOUT_MS);
 const NOTE_SYNC_WINDOW_DAYS = parsePositiveInt(import.meta.env.VITE_NOTE_SYNC_WINDOW_DAYS, 92);
 const NOTE_SYNC_WINDOW_MS = NOTE_SYNC_WINDOW_DAYS * 24 * 60 * 60 * 1000;
 
@@ -96,6 +97,13 @@ export const getSyncAuthToken = () => {
   const tokenFromQuery = params.get('sync_token')?.trim();
   if (tokenFromQuery) {
     setSyncAuthToken(tokenFromQuery);
+    params.delete('sync_token');
+    const cleanQuery = params.toString();
+    window.history.replaceState(
+      {},
+      document.title,
+      `${window.location.pathname}${cleanQuery ? `?${cleanQuery}` : ''}${window.location.hash}`
+    );
     return tokenFromQuery;
   }
 
@@ -122,17 +130,37 @@ const syncFetch = async <T>(path: string, init: RequestInit = {}): Promise<T> =>
     headers.set('Content-Type', 'application/json');
   }
 
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...init,
-    headers,
-  });
-
-  if (!response.ok) {
-    const body = await response.text().catch(() => '');
-    throw new Error(`sync_http_${response.status}:${body.slice(0, 300)}`);
+  const controller = new AbortController();
+  const timeoutId = globalThis.setTimeout(() => controller.abort(), SYNC_HTTP_TIMEOUT_MS);
+  const relayAbort = () => controller.abort();
+  if (init.signal?.aborted) {
+    controller.abort();
+  } else {
+    init.signal?.addEventListener('abort', relayAbort, { once: true });
   }
 
-  return (await response.json()) as T;
+  try {
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+      headers,
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      throw new Error(`sync_http_${response.status}:${body.slice(0, 300)}`);
+    }
+
+    return (await response.json()) as T;
+  } catch (error) {
+    if (controller.signal.aborted && !init.signal?.aborted) {
+      throw new Error('sync_request_timeout');
+    }
+    throw error;
+  } finally {
+    globalThis.clearTimeout(timeoutId);
+    init.signal?.removeEventListener('abort', relayAbort);
+  }
 };
 
 const resolveClientUpdatedAt = (item: Record<string, any>) => {

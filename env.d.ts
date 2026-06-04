@@ -7,6 +7,7 @@ interface ImportMetaEnv {
   readonly VITE_SYNC_INTERVAL_MS?: string;
   readonly VITE_SYNC_MAX_RETRIES?: string;
   readonly VITE_SYNC_LINEAR_RETRY_MS?: string;
+  readonly VITE_SYNC_HTTP_TIMEOUT_MS?: string;
   readonly VITE_NOTE_SYNC_WINDOW_DAYS?: string;
   readonly VITE_GOOGLE_CLIENT_ID?: string;
   readonly VITE_API_URL?: string;

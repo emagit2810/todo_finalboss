@@ -23,7 +23,7 @@ interface WakeServiceTarget {
   url: string;
 }
 
-const DEFAULT_FASTAPI_HEALTH_URL = 'https://fast-api-v.onrender.com/healthz';
+const DEFAULT_FASTAPI_HEALTH_URL = 'https://fast-api-v-r6s0.onrender.com/healthz';
 const DEFAULT_N8N_HEALTH_URL = 'https://n8n-service-ea3k.onrender.com/healthz';
 
 const FASTAPI_HEALTH_URL =
