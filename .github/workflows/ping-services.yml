@@ -15,7 +15,7 @@ jobs:
     - name: Ping Fast API Service
       run: |
         echo "Pinging Fast API service..."
-        response=$(curl -s -o /dev/null -w "%{http_code}" https://fast-api-v.onrender.com/healthz)
+        response=$(curl -s -o /dev/null -w "%{http_code}" https://fast-api-v-r6s0.onrender.com/healthz)
         if [ $response -eq 200 ]; then
           echo "✅ Fast API service responded with $response"
         else
@@ -35,5 +35,5 @@ jobs:
     - name: Log Results
       run: |
         echo "Services pinged at $(date)"
-        echo "Fast API: https://fast-api-v.onrender.com/healthz"
+        echo "Fast API: https://fast-api-v-r6s0.onrender.com/healthz"
         echo "N8N Service: https://n8n-service-ea3k.onrender.com/healthz"
